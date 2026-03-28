@@ -12,14 +12,14 @@ dependencies:
   - seaborn
   - tqdm
   - pyarrow
-  - fastparquet
   - python-dotenv
+  - jupyter
+  - ipykernel
+  - scipy
   - pip:
       - kaggle
-      - transformers>=4.40.0
-      - datasets>=2.19.0
-      - torch>=2.2.0
-      - accelerate>=0.29.0
-      - evaluate>=0.4.1
-      - sentencepiece
-      - protobuf
+      - xgboost
+      - tree-sitter
+      - tree-sitter-python
+      - tree-sitter-java
+      - tree-sitter-cpp

@@ -1,55 +1,46 @@
-# Environment variables (contains Kaggle credentials)
+# ── Credentials ──
 .env
-
-# Kaggle credentials
 kaggle.json
-~/.kaggle/
 
-# Python
+# ── Python ──
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg
 *.egg-info/
-dist/
-build/
-.eggs/
 
-# Jupyter Notebooks checkpoints
-.ipynb_checkpoints/
-
-# Virtual environments / Conda
+# ── Environments ──
 env/
 venv/
 .venv/
-*.conda
 
-# Data files (large binary assets)
-data/*.parquet
-data/*.csv
-data/*.json
-data/*.zip
+# ── Data (large files) ──
+data/raw/
+data/processed/*.parquet
+data/processed/*.pkl
+!data/processed/feature_list.txt
 
-# Model checkpoints and outputs
+# ── Outputs ──
+models/
+results/
 *.pt
 *.bin
 *.ckpt
-*.safetensors
-models/
-results/
+*.pkl
+output_log*
 
-# Logs
+# ── Notebooks ──
+.ipynb_checkpoints/
+notebooks/*.html
+
+# ── Project Guides ──
+kaggle_workflow.md
+
+# ── Logs ──
 *.log
 logs/
+wandb/
 
-# IDEs
+# ── Editors / OS ──
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS
 .DS_Store
 Thumbs.db
