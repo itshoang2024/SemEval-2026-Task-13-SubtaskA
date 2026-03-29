@@ -534,7 +534,16 @@ if __name__ == "__main__":
     data_dir = Path(cfg.data_dir)
     train_path = data_dir / "task_a_training_set_1.parquet" if (data_dir / "task_a_training_set_1.parquet").exists() else data_dir / "train.parquet"
     val_path   = data_dir / "task_a_validation_set.parquet" if (data_dir / "task_a_validation_set.parquet").exists() else data_dir / "validation.parquet"
-    test_path  = data_dir / "test.parquet"
+    
+    # Try different combinations of test set filenames
+    if (data_dir / "test.parquet").exists():
+        test_path = data_dir / "test.parquet"
+    elif (data_dir / "task_a_test.parquet").exists():
+        test_path = data_dir / "task_a_test.parquet"
+    elif (data_dir / "task_a_test_set.parquet").exists():
+        test_path = data_dir / "task_a_test_set.parquet"
+    else:
+        test_path = data_dir / "test.parquet"  # Default fallback
 
     df_train = pd.read_parquet(train_path)
     df_val   = pd.read_parquet(val_path)
@@ -775,7 +784,10 @@ if __name__ == "__main__":
             "ID": df_test["ID"].values,
             "label": (test_probs > 0.5).astype(int),
         })
-        sub_path = cache_dir / "submission_p5.csv"
+        if IN_KAGGLE:
+            sub_path = Path("/kaggle/working/submission.csv")
+        else:
+            sub_path = cache_dir / "submission.csv"
         submission.to_csv(sub_path, index=False)
 
         # Probabilities
