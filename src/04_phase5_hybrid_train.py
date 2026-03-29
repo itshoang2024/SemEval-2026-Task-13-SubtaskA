@@ -86,8 +86,17 @@ class Config:
 
 
 # -- Auto-detect environment --
+IN_KAGGLE = "kaggle_secrets" in sys.modules or os.path.exists("/kaggle/working")
 IN_COLAB = "google.colab" in sys.modules or os.path.exists("/content")
-if IN_COLAB:
+
+if IN_KAGGLE:
+    base_k = Path("/kaggle/input/sem-eval-2026-task-13-subtask-a")
+    if (base_k / "Task_A").exists():
+        d_dir = str(base_k / "Task_A")
+    else:
+        d_dir = str(base_k)
+    cfg = Config(data_dir=d_dir, output_dir="/kaggle/working/outputs_p5")
+elif IN_COLAB:
     cfg = Config(data_dir="/content/data", output_dir="/content/outputs_p5")
 else:
     _root = Path(__file__).resolve().parent.parent
