@@ -544,18 +544,9 @@ if __name__ == "__main__":
     # ── 7.1 Load data ──
     print("\n[1/6] Loading data...")
     data_dir = Path(cfg.data_dir)
-    train_path = data_dir / "task_a_training_set_1.parquet" if (data_dir / "task_a_training_set_1.parquet").exists() else data_dir / "train.parquet"
-    val_path   = data_dir / "task_a_validation_set.parquet" if (data_dir / "task_a_validation_set.parquet").exists() else data_dir / "validation.parquet"
-    
-    # Try different combinations of test set filenames
-    if (data_dir / "test.parquet").exists():
-        test_path = data_dir / "test.parquet"
-    elif (data_dir / "task_a_test.parquet").exists():
-        test_path = data_dir / "task_a_test.parquet"
-    elif (data_dir / "task_a_test_set.parquet").exists():
-        test_path = data_dir / "task_a_test_set.parquet"
-    else:
-        test_path = data_dir / "test.parquet"  # Default fallback
+    train_path = data_dir / "train.parquet"
+    val_path   = data_dir / "validation.parquet"
+    test_path  = data_dir / "test.parquet"
 
     df_train = pd.read_parquet(train_path)
     df_val   = pd.read_parquet(val_path)
@@ -848,7 +839,7 @@ if __name__ == "__main__":
 
     # ── 7.7 TẠO FILE QUÉT NỘP THỬ THEO FORMAT test_sample.parquet ──
     print("\n[7/7] Tạo output dựa trên format của test_sample.parquet...")
-    sample_path = data_dir / "task_a_test_set_sample.parquet" if (data_dir / "task_a_test_set_sample.parquet").exists() else data_dir / "test_sample.parquet"
+    sample_path = data_dir / "test_sample.parquet"
     if sample_path.exists():
         df_sample = pd.read_parquet(sample_path)
         feats_sample = np.stack([extract_13_features(c) for c in df_sample["code"]])
