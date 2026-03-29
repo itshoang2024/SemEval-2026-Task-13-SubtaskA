@@ -63,7 +63,7 @@ class Config:
 
     # -- Training --
     n_folds: int = 5
-    epochs: int = 3
+    epochs: int = 1
     batch_size: int = 16                       # Per-GPU batch
     grad_accum_steps: int = 4                  # Effective batch = 16*4 = 64
     lr_backbone: float = 1e-5                  # Differential LR
@@ -444,7 +444,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler, scaler,
     model.train()
     total_loss = 0; total_ce = 0; total_sc = 0
     steps = 0
-    pbar = tqdm(loader, desc=f"  Train E{epoch}", leave=False)
+    pbar = tqdm(loader, desc=f"  Train E{epoch}", leave=False, mininterval=10.0)
 
     optimizer.zero_grad()
     for i, batch in enumerate(pbar):
@@ -483,7 +483,7 @@ def evaluate(model, loader, device, cfg):
     model.eval()
     all_probs = []; all_labels = []
 
-    for batch in tqdm(loader, desc="  Eval", leave=False):
+    for batch in tqdm(loader, desc="  Eval", leave=False, mininterval=10.0):
         input_ids = batch["input_ids"].to(device)
         attn_mask = batch["attention_mask"].to(device)
         expert    = batch["expert_feats"].to(device)
@@ -543,7 +543,7 @@ if __name__ == "__main__":
             print(f"  Loaded cached: {cache.name}")
             return np.load(cache)
         feats = np.stack([extract_13_features(c) for c in
-                          tqdm(df[code_col], desc=f"  {name}", leave=False)])
+                          tqdm(df[code_col], desc=f"  {name}", leave=False, mininterval=10.0)])
         np.save(cache, feats)
         print(f"  Cached: {cache.name} {feats.shape}")
         return feats
@@ -628,6 +628,31 @@ if __name__ == "__main__":
         print(f"  FOLD {fold}/{cfg.n_folds}")
         print(f"{'='*60}")
         print(f"  Train: {len(tr_idx):,}, Val: {len(va_idx):,}")
+
+        # Checkpoint resume
+        fold_model_path = fold_models_dir / f"fold{fold}_best.pt"
+        if fold_model_path.exists():
+            print(f"  [Resume] Tìm thấy model của fold {fold}. Bỏ qua train và tiến hành load...")
+            model = HybridFusionModel(
+                cfg.backbone_name, cfg.expert_input_dim,
+                cfg.expert_hidden_dim, cfg.projection_dim, cfg.dropout,
+            ).to(device)
+            model.load_state_dict(torch.load(fold_model_path, weights_only=True))
+
+            ds_va = HybridCodeDataset(
+                codes_train[va_idx], expert_train[va_idx], labels_train[va_idx],
+                tokenizer, cfg.max_length)
+            dl_va = DataLoader(ds_va, batch_size=cfg.batch_size * 2, shuffle=False,
+                               num_workers=2, pin_memory=True)
+                               
+            val_probs, val_auc, val_f1 = evaluate(model, dl_va, device, cfg)
+            oof_probs[va_idx] = val_probs
+            fold_aucs.append(val_auc)
+            fold_f1s.append(val_f1)
+            print(f"  Fold {fold} resumed: AUC={val_auc:.4f}, F1={val_f1:.4f}")
+            del model, ds_va, dl_va
+            gc.collect(); torch.cuda.empty_cache()
+            continue
 
         # Datasets
         ds_tr = HybridCodeDataset(
