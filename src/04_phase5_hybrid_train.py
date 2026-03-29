@@ -520,7 +520,19 @@ def evaluate(model, loader, device, cfg):
 # ============================================================================
 
 if __name__ == "__main__":
+    import argparse
     from transformers import AutoTokenizer
+
+    parser = argparse.ArgumentParser(description="SemEval-2026 Task 13 Hybrid Training")
+    parser.add_argument("--data_dir", type=str, default=None, help="Đường dẫn thư mục chứa dataset")
+    parser.add_argument("--output_dir", type=str, default=None, help="Đường dẫn thư mục lưu output")
+    args, _ = parser.parse_known_args()
+
+    if args.data_dir: cfg.data_dir = args.data_dir
+    if args.output_dir: cfg.output_dir = args.output_dir
+
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    print(f"\n[CLI Overrides] Data: {cfg.data_dir} | Output: {cfg.output_dir}")
 
     set_seed(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
