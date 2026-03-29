@@ -530,10 +530,13 @@ if __name__ == "__main__":
 
     # ── 7.1 Load data ──
     print("\n[1/6] Loading data...")
-    data_dir = Path(cfg.data_dir)
-    df_train = pd.read_parquet(data_dir / "train.parquet")
-    df_val   = pd.read_parquet(data_dir / "validation.parquet")
-    df_test  = pd.read_parquet(data_dir / "test.parquet")
+    train_path = data_dir / "task_a_training_set_1.parquet" if (data_dir / "task_a_training_set_1.parquet").exists() else data_dir / "train.parquet"
+    val_path   = data_dir / "task_a_validation_set.parquet" if (data_dir / "task_a_validation_set.parquet").exists() else data_dir / "validation.parquet"
+    test_path  = data_dir / "test.parquet"
+
+    df_train = pd.read_parquet(train_path)
+    df_val   = pd.read_parquet(val_path)
+    df_test  = pd.read_parquet(test_path) if test_path.exists() else pd.DataFrame(columns=["ID", "code", "label", "language"])
 
     if cfg.train_sample > 0:
         df_train = df_train.sample(cfg.train_sample, random_state=cfg.seed).reset_index(drop=True)
@@ -593,18 +596,18 @@ if __name__ == "__main__":
 
     xgb_prob_train = xgb_model.predict_proba(feats_train)[:, 1].reshape(-1, 1)
     xgb_prob_val   = xgb_model.predict_proba(feats_val)[:, 1].reshape(-1, 1)
-    xgb_prob_test  = xgb_model.predict_proba(feats_test)[:, 1].reshape(-1, 1)
+    xgb_prob_test  = xgb_model.predict_proba(feats_test)[:, 1].reshape(-1, 1) if len(feats_test) > 0 else np.empty((0, 1))
 
     # Concat: 13 features + 1 XGB prob = 14-dim
     expert_train = np.hstack([feats_train, xgb_prob_train])  # (N, 14)
     expert_val   = np.hstack([feats_val,   xgb_prob_val])
-    expert_test  = np.hstack([feats_test,  xgb_prob_test])
+    expert_test  = np.hstack([feats_test,  xgb_prob_test]) if len(feats_test) > 0 else np.empty((0, 14))
 
     # Z-score normalization (mu=0, sigma=1)
     scaler = StandardScaler()
     expert_train = scaler.fit_transform(expert_train).astype(np.float32)
     expert_val   = scaler.transform(expert_val).astype(np.float32)
-    expert_test  = scaler.transform(expert_test).astype(np.float32)
+    expert_test  = scaler.transform(expert_test).astype(np.float32) if len(expert_test) > 0 else expert_test
 
     with open(cache_dir / "zscore_scaler.pkl", "wb") as f:
         pickle.dump(scaler, f)
@@ -744,42 +747,45 @@ if __name__ == "__main__":
     # ── 7.6 Inference on test set ──
     print("\n[6/6] Test inference (ensemble of best folds)...")
 
-    test_ds = HybridCodeDataset(
-        df_test["code"].values, expert_test, None, tokenizer, cfg.max_length)
-    test_dl = DataLoader(test_ds, batch_size=cfg.batch_size * 2, shuffle=False,
-                         num_workers=2, pin_memory=True)
+    if len(df_test) > 0:
+        test_ds = HybridCodeDataset(
+            df_test["code"].values, expert_test, None, tokenizer, cfg.max_length)
+        test_dl = DataLoader(test_ds, batch_size=cfg.batch_size * 2, shuffle=False,
+                             num_workers=2, pin_memory=True)
 
-    test_probs = np.zeros(len(df_test))
-    for fold in range(1, cfg.n_folds + 1):
-        model = HybridFusionModel(
-            cfg.backbone_name, cfg.expert_input_dim,
-            cfg.expert_hidden_dim, cfg.projection_dim, cfg.dropout,
-        ).to(device)
-        model.load_state_dict(torch.load(
-            fold_models_dir / f"fold{fold}_best.pt", weights_only=True))
+        test_probs = np.zeros(len(df_test))
+        for fold in range(1, cfg.n_folds + 1):
+            model = HybridFusionModel(
+                cfg.backbone_name, cfg.expert_input_dim,
+                cfg.expert_hidden_dim, cfg.projection_dim, cfg.dropout,
+            ).to(device)
+            model.load_state_dict(torch.load(
+                fold_models_dir / f"fold{fold}_best.pt", weights_only=True))
 
-        probs, _, _ = evaluate(model, test_dl, device, cfg)
-        test_probs += probs / cfg.n_folds
-        del model; gc.collect(); torch.cuda.empty_cache()
+            probs, _, _ = evaluate(model, test_dl, device, cfg)
+            test_probs += probs / cfg.n_folds
+            del model; gc.collect(); torch.cuda.empty_cache()
 
-    # Submission
-    submission = pd.DataFrame({
-        "ID": df_test["ID"].values,
-        "label": (test_probs > 0.5).astype(int),
-    })
-    sub_path = cache_dir / "submission_p5.csv"
-    submission.to_csv(sub_path, index=False)
+        # Submission
+        submission = pd.DataFrame({
+            "ID": df_test["ID"].values,
+            "label": (test_probs > 0.5).astype(int),
+        })
+        sub_path = cache_dir / "submission_p5.csv"
+        submission.to_csv(sub_path, index=False)
 
-    # Probabilities
-    pd.DataFrame({
-        "ID": df_test["ID"].values,
-        "prob_ai": test_probs,
-        "label": (test_probs > 0.5).astype(int),
-    }).to_parquet(cache_dir / "test_preds_p5.parquet", index=False)
+        # Probabilities
+        pd.DataFrame({
+            "ID": df_test["ID"].values,
+            "prob_ai": test_probs,
+            "label": (test_probs > 0.5).astype(int),
+        }).to_parquet(cache_dir / "test_preds_p5.parquet", index=False)
 
-    print(f"\n  Submission: {sub_path}")
-    print(f"  Predicted AI ratio: {(test_probs > 0.5).mean():.4f}")
-    print(f"  Label dist: {submission['label'].value_counts().to_dict()}")
+        print(f"\n  Submission: {sub_path}")
+        print(f"  Predicted AI ratio: {(test_probs > 0.5).mean():.4f}")
+        print(f"  Label dist: {submission['label'].value_counts().to_dict()}")
+    else:
+        print("  Bỏ qua Inference trên test.parquet do không tìm thấy file.")
 
     # -- Validate on val set --
     print("\n  Validation set (ensemble)...")
@@ -814,7 +820,7 @@ if __name__ == "__main__":
 
     # ── 7.7 TẠO FILE QUÉT NỘP THỬ THEO FORMAT test_sample.parquet ──
     print("\n[7/7] Tạo output dựa trên format của test_sample.parquet...")
-    sample_path = data_dir / "test_sample.parquet"
+    sample_path = data_dir / "task_a_test_set_sample.parquet" if (data_dir / "task_a_test_set_sample.parquet").exists() else data_dir / "test_sample.parquet"
     if sample_path.exists():
         df_sample = pd.read_parquet(sample_path)
         feats_sample = np.stack([extract_13_features(c) for c in df_sample["code"]])
