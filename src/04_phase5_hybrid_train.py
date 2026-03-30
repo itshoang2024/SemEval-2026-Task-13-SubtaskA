@@ -62,7 +62,7 @@ class Config:
     dropout: float = 0.1
 
     # -- Training --
-    n_folds: int = 5
+    n_folds: int = 2
     epochs: int = 1
     batch_size: int = 16                       # Per-GPU batch
     grad_accum_steps: int = 4                  # Effective batch = 16*4 = 64
