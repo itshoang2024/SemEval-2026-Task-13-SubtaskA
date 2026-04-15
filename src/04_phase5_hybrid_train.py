@@ -70,19 +70,23 @@ class Config:
     expert_input_dim: int = 14                 # 13 features + 1 XGB probability
     expert_hidden_dim: int = 64                # Expert branch MLP output
     projection_dim: int = 128                  # SupCon projection head dim
-    dropout: float = 0.1
+    dropout: float = 0.3                       # ↑ Tăng mạnh từ 0.1 → 0.3 chống overfit
+    expert_feat_mask_prob: float = 0.5         # [NEW] Xác suất mask expert features khi train
+    expert_gate_lambda: float = 0.01           # [NEW] L2 penalty trên expert gate
+    code_augment: bool = True                  # [NEW] Augment code formatting khi train
 
     # -- Training --
-    epochs: int = 3                            # 3 epochs per model
-    freeze_backbone_epochs: int = 2            # Freeze CodeBERT 2 epochs đầu
-    batch_size: int = 32                       # Per-GPU batch (tăng từ 16)
+    epochs: int = 4                            # ↑ Tăng lên 4 vì regularization mạnh hơn
+    freeze_backbone_epochs: int = 1            # ↓ Giảm xuống 1 để CodeBERT học sớm hơn
+    batch_size: int = 32                       # Per-GPU batch
     grad_accum_steps: int = 2                  # Effective batch = 32*2 = 64
-    lr_backbone: float = 1e-5                  # Differential LR (chỉ dùng khi unfreeze)
-    lr_head: float = 1e-3                      # Head lr cao hơn khi freeze backbone
-    weight_decay: float = 0.01
+    lr_backbone: float = 2e-5                  # ↑ Tăng nhẹ backbone LR
+    lr_head: float = 5e-4                      # ↓ Giảm head LR
+    weight_decay: float = 0.05                 # ↑ Tăng mạnh từ 0.01 → 0.05
     warmup_ratio: float = 0.1
     fp16: bool = True                          # Mixed precision
-    supcon_alpha: float = 0.3                  # Loss weight: alpha*SupCon + (1-a)*CE
+    label_smoothing: float = 0.1               # ↑ Tăng từ 0.05 → 0.1
+    supcon_alpha: float = 0.1                  # ↓ Giảm mạnh: ít SupCon, nhiều CE hơn
     supcon_temperature: float = 0.07
     early_stop_patience: int = 2               # Patience cho early stopping
     seed: int = 42
@@ -354,25 +358,80 @@ def create_balanced_subset(df, sample_size, seed):
 
 
 # ============================================================================
-# 4. DATASET
+# 4. CODE AUGMENTATION (chống overfit vào formatting shortcuts)
+# ============================================================================
+
+import random as _random
+
+def normalize_code(code: str, augment: bool = True) -> str:
+    """Normalize code formatting to prevent model from learning superficial
+    formatting shortcuts (indent style, trailing whitespace, comment presence).
+    
+    During TRAINING (augment=True): randomly apply transformations.
+    During INFERENCE (augment=False): apply deterministic normalization only.
+    """
+    lines = code.split("\n")
+    result = []
+    
+    for line in lines:
+        # Always: strip trailing whitespace (phá shortcut trailing_ws_ratio)
+        line = line.rstrip()
+        
+        if augment:
+            # Random: skip empty lines (50% chance) → phá shortcut avg_line_length
+            if not line.strip() and _random.random() < 0.5:
+                continue
+            
+            # Random: remove single-line comments (30% chance) 
+            # → phá shortcut comment_to_code_ratio
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("//"):
+                if _random.random() < 0.3:
+                    continue
+            
+            # Random: normalize tabs↔spaces (20% chance)
+            # → phá shortcut indent_consistency
+            if _random.random() < 0.2:
+                if "\t" in line:
+                    line = line.replace("\t", "    ")
+                else:
+                    # Convert leading groups of 4 spaces to tab
+                    leading = len(line) - len(line.lstrip(" "))
+                    if leading >= 4:
+                        tabs = leading // 4
+                        line = "\t" * tabs + line[tabs * 4:]
+        
+        result.append(line)
+    
+    return "\n".join(result)
+
+
+# ============================================================================
+# 4b. DATASET
 # ============================================================================
 
 class HybridCodeDataset(Dataset):
     """Dataset yielding (input_ids, attention_mask, expert_features, label)."""
 
     def __init__(self, codes, expert_feats, labels=None, tokenizer=None,
-                 max_length=512):
+                 max_length=512, augment=False):
         self.codes = codes
         self.expert_feats = expert_feats        # (N, 14) numpy — already z-scored
         self.labels = labels                     # None for test
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.augment = augment                   # [NEW] Code augment khi train
 
     def __len__(self):
         return len(self.codes)
 
     def __getitem__(self, idx):
         code = self.codes[idx]
+        
+        # [NEW] Code augmentation: normalize formatting during training
+        if self.augment:
+            code = normalize_code(code, augment=True)
+        
         enc = self.tokenizer(
             code,
             max_length=self.max_length,
@@ -395,9 +454,15 @@ class HybridCodeDataset(Dataset):
 # ============================================================================
 
 class ExpertBranch(nn.Module):
-    """MLP to compress 14-dim expert vector → hidden_dim."""
-    def __init__(self, input_dim=14, hidden_dim=64, dropout=0.1):
+    """MLP to compress 14-dim expert vector → hidden_dim.
+    
+    [ANTI-OVERFIT] Feature Masking: randomly zero-out entire feature columns
+    during training to prevent reliance on any single heuristic shortcut.
+    """
+    def __init__(self, input_dim=14, hidden_dim=64, dropout=0.3,
+                 feat_mask_prob=0.5):
         super().__init__()
+        self.feat_mask_prob = feat_mask_prob  # Probability of masking each feature
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -409,31 +474,49 @@ class ExpertBranch(nn.Module):
         )
 
     def forward(self, x):
+        # [ANTI-OVERFIT] Feature-level dropout during training
+        # Randomly zero-out entire columns so model can't rely on any one feature
+        if self.training and self.feat_mask_prob > 0:
+            mask = torch.bernoulli(
+                torch.full(x.shape, 1.0 - self.feat_mask_prob, device=x.device)
+            )
+            x = x * mask  # Zero out random features
         return self.net(x)
 
 
 class HybridFusionModel(nn.Module):
     """
-    Two-branch architecture:
+    Two-branch architecture with GATED FUSION:
         Semantic: Backbone → CLS token [hidden_size]
-        Expert:   14-dim → MLP → [expert_hidden]
-        Fusion:   Concat → Projection Head → Classifier
+        Expert:   14-dim → MLP (with feature masking) → [expert_hidden]
+        Fusion:   Gated: cls + gate * expert → Classifier
+    
+    [ANTI-OVERFIT] Learnable gate controls expert branch influence.
+    L2 penalty on gate encourages model to rely on CodeBERT semantics.
 
     Returns:
         logits     (N, 2) for CrossEntropy
         embeddings (N, projection_dim) for SupCon
+        gate_val   scalar for L2 penalty in loss
     """
     def __init__(self, backbone_name, expert_input_dim=14,
-                 expert_hidden_dim=64, projection_dim=128, dropout=0.1):
+                 expert_hidden_dim=64, projection_dim=128, dropout=0.3,
+                 feat_mask_prob=0.5):
         super().__init__()
         from transformers import AutoModel
 
         self.backbone = AutoModel.from_pretrained(backbone_name)
         hidden_size = self.backbone.config.hidden_size  # 768 for base
 
-        self.expert_branch = ExpertBranch(expert_input_dim, expert_hidden_dim, dropout)
+        self.expert_branch = ExpertBranch(
+            expert_input_dim, expert_hidden_dim, dropout, feat_mask_prob
+        )
 
         fused_dim = hidden_size + expert_hidden_dim  # 768 + 64 = 832
+
+        # [ANTI-OVERFIT] Learnable gate: controls how much expert influences output
+        # Initialized to 0.3 so expert starts with low influence
+        self.expert_gate = nn.Parameter(torch.tensor(0.3))
 
         # Projection head (for SupCon)
         self.projector = nn.Sequential(
@@ -470,14 +553,19 @@ class HybridFusionModel(nn.Module):
         # Expert branch
         expert_out = self.expert_branch(expert_feats)      # (B, expert_hidden)
 
-        # Fusion
-        fused = torch.cat([cls_token, expert_out], dim=-1) # (B, fused_dim)
+        # [ANTI-OVERFIT] Gated Fusion: sigmoid gate limits expert influence
+        gate = torch.sigmoid(self.expert_gate)             # scalar in (0, 1)
+        gated_expert = gate * expert_out                   # Scale expert contribution
+        fused = torch.cat([cls_token, gated_expert], dim=-1)  # (B, fused_dim)
 
         # Outputs
         logits = self.classifier(fused)                    # (B, 2)
-        embeddings = F.normalize(self.projector(fused), dim=-1)  # (B, proj_dim)
+        
+        # Calculate projection and normalize in float32 to prevent FP16 NaN underflows
+        proj = self.projector(fused).float()
+        embeddings = F.normalize(proj, p=2, dim=-1, eps=1e-8)  # (B, proj_dim)
 
-        return logits, embeddings
+        return logits, embeddings, gate
 
 
 # ============================================================================
@@ -496,6 +584,8 @@ class SupConLoss(nn.Module):
         if B <= 1:
             return torch.tensor(0.0, device=device)
 
+        # Assure embeddings are fp32 for stable dot products
+        embeddings = embeddings.float()
         sim = torch.matmul(embeddings, embeddings.T) / self.temperature
         labels = labels.view(-1, 1)
         mask = (labels == labels.T).float().to(device)
@@ -515,18 +605,31 @@ class SupConLoss(nn.Module):
 
 
 class HybridLoss(nn.Module):
-    """L = alpha * SupCon + (1 - alpha) * CrossEntropy"""
+    """L = alpha * SupCon + (1 - alpha) * CrossEntropy + lambda * gate_penalty
+    
+    [ANTI-OVERFIT] Added gate_lambda penalty to discourage heavy expert reliance.
+    """
 
-    def __init__(self, alpha=0.3, temperature=0.07, label_smoothing=0.05):
+    def __init__(self, alpha=0.1, temperature=0.07, label_smoothing=0.1,
+                 gate_lambda=0.01):
         super().__init__()
         self.alpha = alpha
+        self.gate_lambda = gate_lambda
         self.supcon = SupConLoss(temperature)
         self.ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
-    def forward(self, logits, embeddings, labels):
+    def forward(self, logits, embeddings, labels, gate_val=None):
         loss_ce = self.ce(logits, labels)
         loss_sc = self.supcon(embeddings, labels)
-        return self.alpha * loss_sc + (1 - self.alpha) * loss_ce, loss_ce, loss_sc
+        total = self.alpha * loss_sc + (1 - self.alpha) * loss_ce
+        
+        # [ANTI-OVERFIT] L2 penalty on expert gate — push gate toward 0
+        # This encourages model to rely on CodeBERT semantics over expert heuristics
+        if gate_val is not None:
+            gate_penalty = self.gate_lambda * (gate_val ** 2)
+            total = total + gate_penalty
+        
+        return total, loss_ce, loss_sc
 
 
 # ============================================================================
@@ -540,25 +643,24 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def get_optimizer(model, cfg, backbone_frozen=False):
+def get_optimizer(model, cfg):
     """Differential learning rates: backbone slower, head faster."""
     backbone_params = []
     head_params = []
 
     for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
         if "backbone" in name:
             backbone_params.append(param)
         else:
             head_params.append(param)
 
     groups = []
-    if backbone_params and not backbone_frozen:
+    if backbone_params:
         groups.append({"params": backbone_params, "lr": cfg.lr_backbone,
                        "weight_decay": cfg.weight_decay})
-    groups.append({"params": head_params, "lr": cfg.lr_head,
-                   "weight_decay": cfg.weight_decay})
+    if head_params:
+        groups.append({"params": head_params, "lr": cfg.lr_head,
+                       "weight_decay": cfg.weight_decay})
 
     return torch.optim.AdamW(groups)
 
@@ -587,8 +689,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler, scaler,
         labels    = batch["labels"].to(device)
 
         with torch.cuda.amp.autocast(enabled=cfg.fp16):
-            logits, embeds = model(input_ids, attn_mask, expert)
-            loss, lce, lsc = criterion(logits, embeds, labels)
+            logits, embeds, gate_val = model(input_ids, attn_mask, expert)
+            loss, lce, lsc = criterion(logits, embeds, labels, gate_val)
             loss = loss / cfg.grad_accum_steps
 
         scaler.scale(loss).backward()
@@ -623,7 +725,7 @@ def evaluate(model, loader, device, cfg):
         expert    = batch["expert_feats"].to(device)
 
         with torch.cuda.amp.autocast(enabled=cfg.fp16):
-            logits, _ = model(input_ids, attn_mask, expert)
+            logits, _, _ = model(input_ids, attn_mask, expert)
 
         probs = F.softmax(logits, dim=-1)[:, 1].cpu().numpy()
         all_probs.append(probs)
@@ -657,6 +759,7 @@ def train_single_model(model_idx, df_train_subset, expert_train_subset,
         model = HybridFusionModel(
             cfg.backbone_name, cfg.expert_input_dim,
             cfg.expert_hidden_dim, cfg.projection_dim, cfg.dropout,
+            cfg.expert_feat_mask_prob,
         ).to(device)
         model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
         
@@ -674,9 +777,9 @@ def train_single_model(model_idx, df_train_subset, expert_train_subset,
     labels_tr = df_train_subset["label"].values
 
     ds_tr = HybridCodeDataset(codes_tr, expert_train_subset, labels_tr,
-                              tokenizer, cfg.max_length)
+                              tokenizer, cfg.max_length, augment=cfg.code_augment)
     ds_va = HybridCodeDataset(codes_val, expert_val, labels_val,
-                              tokenizer, cfg.max_length)
+                              tokenizer, cfg.max_length, augment=False)
 
     dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True,
                        num_workers=2, pin_memory=True, drop_last=True)
@@ -687,15 +790,25 @@ def train_single_model(model_idx, df_train_subset, expert_train_subset,
     model = HybridFusionModel(
         cfg.backbone_name, cfg.expert_input_dim,
         cfg.expert_hidden_dim, cfg.projection_dim, cfg.dropout,
+        cfg.expert_feat_mask_prob,
     ).to(device)
 
     # Gradient checkpointing (saves VRAM)
     if hasattr(model.backbone, "gradient_checkpointing_enable"):
         model.backbone.gradient_checkpointing_enable()
 
-    # Criterion
+    # Criterion (with gate penalty and increased label smoothing)
     criterion = HybridLoss(alpha=cfg.supcon_alpha,
-                           temperature=cfg.supcon_temperature)
+                           temperature=cfg.supcon_temperature,
+                           label_smoothing=cfg.label_smoothing,
+                           gate_lambda=cfg.expert_gate_lambda)
+
+    # Initialize Optimizer and Scaler ONCE to preserve momentum and state
+    model.freeze_backbone()  # Start with frozen backbone
+    optimizer = get_optimizer(model, cfg)
+    total_steps = (len(dl_tr) // cfg.grad_accum_steps) * cfg.epochs
+    scheduler = get_scheduler(optimizer, total_steps, cfg.warmup_ratio)
+    scaler = torch.cuda.amp.GradScaler(enabled=cfg.fp16)
 
     best_auc = 0; patience = 0
 
@@ -705,20 +818,10 @@ def train_single_model(model_idx, df_train_subset, expert_train_subset,
         # === Progressive Unfreezing ===
         if epoch <= cfg.freeze_backbone_epochs:
             backbone_frozen = True
-            if epoch == 1:
-                model.freeze_backbone()
         else:
             backbone_frozen = False
             if epoch == cfg.freeze_backbone_epochs + 1:
                 model.unfreeze_backbone()
-
-        # Re-create optimizer khi thay đổi freeze state
-        if epoch == 1 or epoch == cfg.freeze_backbone_epochs + 1:
-            optimizer = get_optimizer(model, cfg, backbone_frozen)
-            remaining_epochs = cfg.epochs - epoch + 1
-            total_steps = (len(dl_tr) // cfg.grad_accum_steps) * remaining_epochs
-            scheduler = get_scheduler(optimizer, total_steps, cfg.warmup_ratio)
-            scaler = torch.cuda.amp.GradScaler(enabled=cfg.fp16)
 
         # Train
         train_loss = train_one_epoch(
@@ -734,11 +837,12 @@ def train_single_model(model_idx, df_train_subset, expert_train_subset,
               f"val_AUC={val_auc:.4f}, val_F1={val_f1:.4f}, "
               f"time={elapsed:.0f}s")
 
-        # Check AI prediction ratio
+        # Check AI prediction ratio + gate value
         pred_labels = (val_probs > 0.5).astype(int)
         ai_ratio = pred_labels.mean()
+        gate_v = torch.sigmoid(model.expert_gate).item()
         print(f"    → Predicted AI ratio on val: {ai_ratio:.4f} "
-              f"(actual: {labels_val.mean():.4f})")
+              f"(actual: {labels_val.mean():.4f}), gate={gate_v:.4f}")
 
         # Early stopping
         if val_auc > best_auc:
@@ -806,7 +910,7 @@ class HybridInferencer:
         for i in range(1, n_ensemble + 1):
             model = HybridFusionModel(
                 backbone_name, expert_input_dim=14, expert_hidden_dim=64,
-                projection_dim=128, dropout=0.1
+                projection_dim=128, dropout=0.3, feat_mask_prob=0.0
             ).to(self.device)
             
             # Try ensemble path first, then fold path
@@ -858,7 +962,7 @@ class HybridInferencer:
                 exp = batch["expert_feats"].to(self.device)
 
                 with torch.cuda.amp.autocast(enabled=True):
-                    logits, _ = model(input_ids, attn_mask, exp)
+                    logits, _, _ = model(input_ids, attn_mask, exp)
                 probs = F.softmax(logits, dim=-1)[:, 1].cpu().numpy()
                 all_probs.append(probs)
 
@@ -1129,6 +1233,7 @@ if __name__ == "__main__":
         model = HybridFusionModel(
             cfg.backbone_name, cfg.expert_input_dim,
             cfg.expert_hidden_dim, cfg.projection_dim, cfg.dropout,
+            cfg.expert_feat_mask_prob,
         ).to(device)
         model.load_state_dict(torch.load(model_pt, weights_only=True))
         probs, _, _ = evaluate(model, val_dl, device, cfg)
@@ -1148,20 +1253,16 @@ if __name__ == "__main__":
     print(classification_report(labels_val, (val_probs_ens > 0.5).astype(int),
                                 target_names=["Human (0)", "AI (1)"]))
 
-    # -- Optimal threshold search (Macro F1) --
-    print("  Searching optimal threshold on validation set...")
-    best_t, best_mf1 = 0.5, 0.0
-    for t in np.arange(0.25, 0.75, 0.005):
-        preds_t = (val_probs_ens > t).astype(int)
-        mf1 = f1_score(labels_val, preds_t, average="macro")
-        if mf1 > best_mf1:
-            best_t, best_mf1 = t, mf1
-    optimal_threshold = best_t
+    # -- [ANTI-OVERFIT] Fixed threshold = 0.5 --
+    # Lý do: auto-search threshold trên val set quá dễ sẽ chọn threshold quá thấp
+    # gây ra false positive cực đoan trên test set (86% predicted AI).
+    optimal_threshold = 0.5
     opt_preds = (val_probs_ens > optimal_threshold).astype(int)
-    print(f"  Optimal threshold: {optimal_threshold:.3f} (Macro F1={best_mf1:.4f})")
-    print(f"  Val pred ratio (optimal): AI={opt_preds.mean():.4f} "
+    mf1_fixed = f1_score(labels_val, opt_preds, average="macro")
+    print(f"  [ANTI-OVERFIT] Fixed threshold: {optimal_threshold:.3f} (Macro F1={mf1_fixed:.4f})")
+    print(f"  Val pred ratio (fixed): AI={opt_preds.mean():.4f} "
           f"(actual={labels_val.mean():.4f})")
-    print(f"  Val label dist (optimal): "
+    print(f"  Val label dist (fixed): "
           f"{{0: {(opt_preds==0).sum()}, 1: {(opt_preds==1).sum()}}}")
 
     # Save threshold for inference-only mode
@@ -1189,6 +1290,7 @@ if __name__ == "__main__":
             model = HybridFusionModel(
                 cfg.backbone_name, cfg.expert_input_dim,
                 cfg.expert_hidden_dim, cfg.projection_dim, cfg.dropout,
+                cfg.expert_feat_mask_prob,
             ).to(device)
             model.load_state_dict(torch.load(model_pt, weights_only=True))
             probs, _, _ = evaluate(model, test_dl, device, cfg)
