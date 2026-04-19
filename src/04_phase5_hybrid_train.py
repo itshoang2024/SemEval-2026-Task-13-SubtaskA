@@ -59,11 +59,11 @@ class Config:
     backbone_name: str = "microsoft/unixcoder-base"  # UniXcoder: unified cross-modal code repr
 
     # -- Data --
-    max_length: int = 512                      # Token limit (covers ~95% samples)
-    train_sample: int = 50_000                 # Mỗi balanced subset = 50K (25K per class)
+    max_length: int = 384                      # ↓ Giảm từ 512 → 384 tiết kiệm thời gian (vẫn cover ~90%)
+    train_sample: int = 30_000                 # ↓ Giảm từ 50K → 30K cho vừa 12h Kaggle
 
     # -- Ensemble --
-    n_ensemble: int = 3                        # Số models trong ensemble
+    n_ensemble: int = 2                        # ↓ Giảm từ 3 → 2 models (tiết kiệm ~33% thời gian)
     # Mỗi model train trên 1 balanced subset khác nhau (seed khác nhau)
 
     # -- Model --
@@ -76,7 +76,7 @@ class Config:
     code_augment: bool = True                  # [NEW] Augment code formatting khi train
 
     # -- Training --
-    epochs: int = 4                            # ↑ Tăng lên 4 vì regularization mạnh hơn
+    epochs: int = 3                            # ↓ Giảm lại 3 cho vừa 12h Kaggle
     freeze_backbone_epochs: int = 1            # ↓ Giảm xuống 1 để CodeBERT học sớm hơn
     batch_size: int = 32                       # Per-GPU batch
     grad_accum_steps: int = 2                  # Effective batch = 32*2 = 64
