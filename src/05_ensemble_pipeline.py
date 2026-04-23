@@ -461,7 +461,7 @@ def run_track2(df_train, val_codes, val_labels, test_codes, cache_dir, cfg):
     print(f"  Device: {device}")
     if device.type == "cuda":
         gpu = torch.cuda.get_device_properties(0)
-        print(f"  GPU: {torch.cuda.get_device_name()} ({gpu.total_mem / 1e9:.1f} GB)")
+        print(f"  GPU: {torch.cuda.get_device_name()} ({gpu.total_memory / 1e9:.1f} GB)")
 
     ckpt_dir = cache_dir / "track2_checkpoint"
     log_path = cache_dir / "track2_train_log.csv"
