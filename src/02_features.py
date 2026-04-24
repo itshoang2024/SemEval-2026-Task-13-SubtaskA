@@ -119,6 +119,10 @@ IDENT_RE  = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 def extract_raw(code: str) -> dict:
     """Extract ~45 language-agnostic features from a code snippet."""
+    # Silence numpy warnings within joblib worker threads
+    np.seterr(all="ignore")
+    warnings.filterwarnings("ignore")
+    
     f = {}
     if not code or not isinstance(code, str):
         code = ""
@@ -237,8 +241,10 @@ def extract_raw(code: str) -> dict:
     # Line length autocorrelation lag-1
     if len(line_lengths) > 2:
         ll = np.array(line_lengths, dtype=float)
-        if ll.std() > 0:
-            f["lag1_autocorr"] = float(np.corrcoef(ll[:-1], ll[1:])[0, 1])
+        v1, v2 = ll[:-1], ll[1:]
+        if v1.std() > 0 and v2.std() > 0:
+            autocorr_val = np.corrcoef(v1, v2)[0, 1]
+            f["lag1_autocorr"] = float(autocorr_val) if not np.isnan(autocorr_val) else 0.0
         else:
             f["lag1_autocorr"] = 0.0
     else:
