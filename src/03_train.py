@@ -186,10 +186,11 @@ def train_xgb(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=No
         colsample_bytree=0.8,
         random_state=42,
         tree_method="hist",
+        early_stopping_rounds=50 if (not is_soft and X_va_in is not None) else None,
         n_jobs=-1
     )
     if not is_soft and X_va_in is not None:
-        model.fit(X_tr, y_tr, eval_set=[(X_va_in, y_va_in), (X_va_out, y_va_out)], early_stopping_rounds=50, verbose=False)
+        model.fit(X_tr, y_tr, eval_set=[(X_va_in, y_va_in), (X_va_out, y_va_out)], verbose=False)
     else:
         model.fit(X_tr, y_tr, verbose=False)
     return model

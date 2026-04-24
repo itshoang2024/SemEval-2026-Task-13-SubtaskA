@@ -528,44 +528,52 @@ plt.show()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 4.5: GOLD CHECK — Forward Validation on test_sample (OOD)
+# STEP 4.5: GOLD CHECK — Cumulative Validation on test_sample (OOD)
 # ═══════════════════════════════════════════════════════════════════════════════
-divider("Step 4.5 · Gold check — OOD Forward Selection")
+divider("Step 4.5 · Gold check — OOD Subset Selection")
 
 candidate_pool = [f for f, _ in target_ranking] 
-selected_features = []
 best_f1 = 0.0
+best_subset = []
 
-log("Running Forward Additive Selection on unseen OOD data (test_sample)...")
-# Test top 20 candidates from LOLO recursively
-for f in candidate_pool[:20]: 
-    test_set = selected_features + [f]
+log("Testing Cumulative Feature Subsets on unseen OOD data (test_sample)...")
+# We test Top 5, 8, 10, 12, 15, 20, 25 features to see which group performs best collectively.
+subset_sizes = [5, 8, 10, 12, 15, 18, 20, 25, 30]
+
+for size in subset_sizes:
+    if size > len(candidate_pool): break
     
+    test_set = candidate_pool[:size]
     X_tr = df_feat_train[test_set].values.astype(np.float32)
     X_va = df_feat_ts[test_set].values.astype(np.float32)
     
     model = lgb.LGBMClassifier(
-        n_estimators=100, max_depth=5, num_leaves=31,
+        n_estimators=300, max_depth=6, num_leaves=63,
         subsample=0.8, colsample_bytree=0.8,
         random_state=42, verbose=-1, n_jobs=-1,
     )
-    model.fit(X_tr, y_train)
-    probs = model.predict_proba(X_va)[:, 1]
+    # Early stop on validation wrapper (using 20% of train) to avoid overfitting the entire 600k 
+    # and to get a slightly generalizable tree forest:
+    np.random.seed(42)
+    val_idx = np.random.choice(len(X_tr), int(len(X_tr)*0.1), replace=False)
+    tr_idx  = np.setdiff1d(np.arange(len(X_tr)), val_idx)
     
+    model.fit(X_tr[tr_idx], y_train[tr_idx], 
+              eval_set=[(X_tr[val_idx], y_train[val_idx])],
+              callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(0)])
+              
+    probs = model.predict_proba(X_va)[:, 1]
     f1 = f1_score(y_ts, (probs > 0.5).astype(int), average="macro")
     
+    log(f"  Top {size:2d} features | F1: {f1:.4f}")
     if f1 > best_f1:
-        log(f"  [+] Added {f[:22]:22s} | F1: {best_f1:.4f} -> {f1:.4f} (Improved!)")
         best_f1 = f1
-        selected_features.append(f)
-    elif f1 >= best_f1 - 0.005 and len(selected_features) < 15:
-        log(f"  [~] Added {f[:22]:22s} | F1: {best_f1:.4f} -> {f1:.4f} (Kept for stability)")
-        selected_features.append(f)
-    else:
-        log(f"  [-] Skip  {f[:22]:22s} | F1 dropped to {f1:.4f} (Toxic OOD Feature!)")
+        best_subset = test_set
 
-log(f"\n  Final selected {len(selected_features)} features. Validating Per-Language F1 Matrix:")
+selected_features = best_subset
+log(f"\n  Final selected optimal subset: Top {len(selected_features)} features (Gold F1 = {best_f1:.4f})")
 
+log(f"\n  Validating Per-Language F1 Matrix for optimal {len(selected_features)} features:")
 X_train_selected = df_feat_train[selected_features].values.astype(np.float32)
 X_ts_selected    = df_feat_ts[selected_features].values.astype(np.float32)
 
