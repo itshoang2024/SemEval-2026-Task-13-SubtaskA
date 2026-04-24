@@ -29,6 +29,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+from joblib import Parallel, delayed
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, roc_auc_score
 
@@ -80,6 +81,22 @@ log(f"Train+Val: {len(tv_df):,} rows | langs={sorted(tv_df['language'].unique())
 log(f"Test Sample: {len(ts_df):,} rows | langs={sorted(ts_df['language'].unique())}")
 log(f"Test: {len(test_df):,} rows | cols={test_df.columns.tolist()}")
 
+def infer_family_from_code(code: str) -> str:
+    """
+    Phân loại code thành 4 họ ngôn ngữ chính.
+    C_CPP, PYTHON, JVM_ISH (Java/C#/Go), SCRIPTING (JS/PHP)
+    """
+    if not isinstance(code, str) or not code:
+        return "PYTHON"
+    
+    if "<?php" in code or "$_" in code or "echo " in code: return "SCRIPTING"
+    if "console.log" in code or "function(" in code or "const " in code or "let " in code or "=>" in code: return "SCRIPTING"
+    if "package main" in code or "func " in code or "fmt." in code or "import (" in code: return "JVM_ISH"
+    if "public static void main" in code or "System.out.println" in code or "using System" in code or "namespace " in code: return "JVM_ISH"
+    if "#include" in code or "std::" in code or "int main" in code or "printf" in code: return "C_CPP"
+    if "def " in code or "import " in code or "print(" in code or "class " in code: return "PYTHON"
+    
+    return "PYTHON"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 1: EXTRACT ~45 RAW FEATURES
@@ -286,18 +303,22 @@ def extract_raw(code: str) -> dict:
 
 
 # ── Batch extraction ─────────────────────────────────────────────────────────
-log("Extracting features from train+val...")
+log("Extracting features from train+val (parallel)...")
 t1 = time.time()
-df_feat_train = pd.DataFrame([extract_raw(c) for c in tqdm(tv_codes, desc="train")])
+n_jobs = 4 # Kaggle CPU typically has 4 cores
+features_tr = Parallel(n_jobs=n_jobs)(delayed(extract_raw)(c) for c in tqdm(tv_codes, desc="train"))
+df_feat_train = pd.DataFrame(features_tr)
 log(f"  Train: {df_feat_train.shape} in {(time.time()-t1)/60:.1f} min")
 
-log("Extracting features from test_sample...")
-df_feat_ts = pd.DataFrame([extract_raw(c) for c in tqdm(ts_codes, desc="test_sample")])
+log("Extracting features from test_sample (parallel)...")
+features_ts = Parallel(n_jobs=n_jobs)(delayed(extract_raw)(c) for c in tqdm(ts_codes, desc="test_sample"))
+df_feat_ts = pd.DataFrame(features_ts)
 log(f"  Test Sample: {df_feat_ts.shape}")
 
-log("Extracting features from test...")
+log("Extracting features from test (parallel)...")
 t2 = time.time()
-df_feat_test = pd.DataFrame([extract_raw(c) for c in tqdm(test_codes, desc="test")])
+features_te = Parallel(n_jobs=n_jobs)(delayed(extract_raw)(c) for c in tqdm(test_codes, desc="test"))
+df_feat_test = pd.DataFrame(features_te)
 log(f"  Test: {df_feat_test.shape} in {(time.time()-t2)/60:.1f} min")
 
 CANDIDATE_FEATURES = list(df_feat_train.columns)
@@ -568,47 +589,53 @@ else:
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 5: PER-LANGUAGE NORMALIZATION + SAVE
 # ═══════════════════════════════════════════════════════════════════════════════
-divider("Step 5 · Per-language normalization + save")
+divider("Step 5 · Transductive Per-family Normalization + save")
 
 X_train_final = df_feat_train[selected_features].values.astype(np.float32)
 X_ts_final    = df_feat_ts[selected_features].values.astype(np.float32)
 X_test_final  = df_feat_test[selected_features].values.astype(np.float32)
 
-# Fit per-language scalers on train
+# Phân loại họ ngôn ngữ cho tất cả tập dữ liệu
+train_fams = np.array([infer_family_from_code(c) for c in tv_codes])
+ts_fams    = np.array([infer_family_from_code(c) for c in ts_codes])
+test_fams  = np.array([infer_family_from_code(c) for c in test_codes])
+
+all_fams = np.unique(np.concatenate([train_fams, test_fams]))
+
 scalers = {}
-for lang in sorted(tv_df["language"].unique()):
-    mask = (train_langs == lang)
+for fam in all_fams:
     sc = StandardScaler()
-    sc.fit(X_train_final[mask])
-    scalers[lang] = sc
-    log(f"  Scaler [{lang:6s}]: fit on {mask.sum():>8,} rows | "
-        f"mean={sc.mean_[:3].round(3)} | std={sc.scale_[:3].round(3)}")
-
-global_scaler = StandardScaler().fit(X_train_final)
-log(f"  Scaler [GLOBAL]: fit on {len(X_train_final):>8,} rows")
-
-# Transform train → per-language
-X_train_normed = np.empty_like(X_train_final)
-for lang in sorted(tv_df["language"].unique()):
-    mask = (train_langs == lang)
-    X_train_normed[mask] = scalers[lang].transform(X_train_final[mask])
-
-# Transform test_sample → per-lang where available, global otherwise
-X_ts_normed = np.empty_like(X_ts_final)
-fallback_count = 0
-for lang in sorted(ts_df["language"].unique()):
-    mask = (ts_langs == lang)
-    if lang in scalers:
-        X_ts_normed[mask] = scalers[lang].transform(X_ts_final[mask])
+    mask_tr = (train_fams == fam)
+    
+    if mask_tr.sum() > 1000:
+        # Nhóm ngôn ngữ có mặt trong train (Python, JVM_ISH, C_CPP)
+        sc.fit(X_train_final[mask_tr])
+        log(f"  Scaler [{fam:10s}]: fit on TRAIN ({mask_tr.sum():>8,} rows)")
     else:
-        X_ts_normed[mask] = global_scaler.transform(X_ts_final[mask])
-        fallback_count += mask.sum()
+        # NGĂN CHẶN DATA SKEW: Transductive scaling cho unseen family (SCRIPTING)
+        mask_te = (test_fams == fam)
+        if mask_te.sum() > 0:
+            sc.fit(X_test_final[mask_te])
+            log(f"  Scaler [{fam:10s}]: fit on TEST (Transductive, {mask_te.sum():>8,} rows)")
+        else:
+            # Fallback
+            sc.fit(X_train_final)
+            log(f"  Scaler [{fam:10s}]: fit on GLOBAL TRAIN (Fallback)")
+            
+    scalers[fam] = sc
 
-if fallback_count:
-    log(f"  ⚠ {fallback_count} test_sample rows used GLOBAL scaler (unseen language)")
+# Apply transform
+X_train_normed = np.empty_like(X_train_final)
+for fam in np.unique(train_fams):
+    X_train_normed[train_fams == fam] = scalers[fam].transform(X_train_final[train_fams == fam])
 
-# Transform test → global scaler (no language column)
-X_test_normed = global_scaler.transform(X_test_final)
+X_ts_normed = np.empty_like(X_ts_final)
+for fam in np.unique(ts_fams):
+    X_ts_normed[ts_fams == fam] = scalers[fam].transform(X_ts_final[ts_fams == fam])
+
+X_test_normed = np.empty_like(X_test_final)
+for fam in np.unique(test_fams):
+    X_test_normed[test_fams == fam] = scalers[fam].transform(X_test_final[test_fams == fam])
 
 # Save
 np.save(OUT_DIR / "train_handcraft.npy", X_train_normed)
