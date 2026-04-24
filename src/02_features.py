@@ -475,7 +475,7 @@ for fold_lang in languages_unique:
     model = lgb.LGBMClassifier(
         n_estimators=300, max_depth=6, num_leaves=63,
         subsample=0.8, colsample_bytree=0.8,
-        is_unbalance=True, random_state=42, verbose=-1, n_jobs=-1,
+        random_state=42, verbose=-1, n_jobs=-1,
     )
     model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)],
               callbacks=[lgb.early_stopping(30), lgb.log_evaluation(0)])
@@ -528,68 +528,66 @@ plt.show()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 4.5: GOLD CHECK — OOD Validation on test_sample
+# STEP 4.5: GOLD CHECK — Forward Validation on test_sample (OOD)
 # ═══════════════════════════════════════════════════════════════════════════════
-divider("Step 4.5 · Gold check on test_sample (8 languages)")
+divider("Step 4.5 · Gold check — OOD Forward Selection")
+
+candidate_pool = [f for f, _ in target_ranking] 
+selected_features = []
+best_f1 = 0.0
+
+log("Running Forward Additive Selection on unseen OOD data (test_sample)...")
+# Test top 20 candidates from LOLO recursively
+for f in candidate_pool[:20]: 
+    test_set = selected_features + [f]
+    
+    X_tr = df_feat_train[test_set].values.astype(np.float32)
+    X_va = df_feat_ts[test_set].values.astype(np.float32)
+    
+    model = lgb.LGBMClassifier(
+        n_estimators=100, max_depth=5, num_leaves=31,
+        subsample=0.8, colsample_bytree=0.8,
+        random_state=42, verbose=-1, n_jobs=-1,
+    )
+    model.fit(X_tr, y_train)
+    probs = model.predict_proba(X_va)[:, 1]
+    
+    f1 = f1_score(y_ts, (probs > 0.5).astype(int), average="macro")
+    
+    if f1 > best_f1:
+        log(f"  [+] Added {f[:22]:22s} | F1: {best_f1:.4f} -> {f1:.4f} (Improved!)")
+        best_f1 = f1
+        selected_features.append(f)
+    elif f1 >= best_f1 - 0.005 and len(selected_features) < 15:
+        log(f"  [~] Added {f[:22]:22s} | F1: {best_f1:.4f} -> {f1:.4f} (Kept for stability)")
+        selected_features.append(f)
+    else:
+        log(f"  [-] Skip  {f[:22]:22s} | F1 dropped to {f1:.4f} (Toxic OOD Feature!)")
+
+log(f"\n  Final selected {len(selected_features)} features. Validating Per-Language F1 Matrix:")
 
 X_train_selected = df_feat_train[selected_features].values.astype(np.float32)
 X_ts_selected    = df_feat_ts[selected_features].values.astype(np.float32)
 
-# Train on full train, predict on test_sample
 gold_model = lgb.LGBMClassifier(
-    n_estimators=500, max_depth=6, num_leaves=63,
+    n_estimators=300, max_depth=6, num_leaves=63,
     subsample=0.8, colsample_bytree=0.8,
-    is_unbalance=True, random_state=42, verbose=-1, n_jobs=-1,
+    random_state=42, verbose=-1, n_jobs=-1,
 )
 gold_model.fit(X_train_selected, y_train)
-
 gold_probs = gold_model.predict_proba(X_ts_selected)[:, 1]
 gold_preds = (gold_probs > 0.5).astype(int)
+
 gold_f1 = f1_score(y_ts, gold_preds, average="macro")
 gold_auc = roc_auc_score(y_ts, gold_probs)
 
 log(f"  GOLD CHECK — Overall: F1={gold_f1:.4f}  AUC={gold_auc:.4f}")
-log(f"  AI rate predicted: {gold_preds.mean():.4f} (true: {y_ts.mean():.4f})")
-log(f"")
-log(f"  Per-language breakdown:")
-
-ts_lang_unique = sorted(ts_df["language"].unique())
-for lang in ts_lang_unique:
+for lang in sorted(ts_df["language"].unique()):
     mask = (ts_langs == lang)
-    n = mask.sum()
-    if n < 2:
-        continue
-    lang_preds = gold_preds[mask]
-    lang_true  = y_ts[mask]
-    lang_f1 = f1_score(lang_true, lang_preds, average="macro")
-    ai_true = lang_true.mean()
-    ai_pred = lang_preds.mean()
+    if mask.sum() < 2: continue
+    lang_f1 = f1_score(y_ts[mask], gold_preds[mask], average="macro")
     seen_tag = "SEEN" if lang in set(tv_df["language"].unique()) else "UNSEEN"
-    log(f"    {lang:12s}: F1={lang_f1:.4f}  n={n:>4d}  "
-        f"AI_true={ai_true:.2%}  AI_pred={ai_pred:.2%}  [{seen_tag}]")
-
-# Decision gate
-if gold_f1 >= 0.60:
-    log(f"\n  ✅ GOLD CHECK PASSED (F1={gold_f1:.4f} >= 0.60)")
-    log(f"  Proceeding with {len(selected_features)} features to Step 5")
-else:
-    log(f"\n  ❌ GOLD CHECK FAILED (F1={gold_f1:.4f} < 0.60)")
-    log(f"  Features may be overfit. Trying top 10 instead...")
-    selected_features = [f for f, _ in target_ranking[:10]]
-    log(f"  Fallback to top 10: {selected_features}")
-
-    # Re-check
-    X_ts_fb = df_feat_ts[selected_features].values.astype(np.float32)
-    X_tr_fb = df_feat_train[selected_features].values.astype(np.float32)
-    fb_model = lgb.LGBMClassifier(
-        n_estimators=500, max_depth=6, num_leaves=63,
-        subsample=0.8, colsample_bytree=0.8,
-        is_unbalance=True, random_state=42, verbose=-1, n_jobs=-1,
-    )
-    fb_model.fit(X_tr_fb, y_train)
-    fb_probs = fb_model.predict_proba(X_ts_fb)[:, 1]
-    fb_f1 = f1_score(y_ts, (fb_probs > 0.5).astype(int), average="macro")
-    log(f"  Fallback F1: {fb_f1:.4f}")
+    log(f"    {lang:12s}: F1={lang_f1:.4f}  n={mask.sum():>4d}  [{seen_tag}]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

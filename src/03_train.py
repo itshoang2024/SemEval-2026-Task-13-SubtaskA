@@ -100,8 +100,13 @@ tv_df    = pd.concat([train_df, val_df], ignore_index=True)
 ts_df    = pd.read_parquet(DATA_DIR / "test_sample.parquet")
 test_df  = pd.read_parquet(DATA_DIR / "test.parquet")
 
-y_tv = tv_df["label"].str.lower().map({"human": 0, "ai": 1}).values.astype(float)
-y_ts = ts_df["label"].str.lower().map({"human": 0, "ai": 1}).values.astype(float)
+def parse_label(col):
+    if col.dtype == object:
+        return col.str.lower().map({"human": 0, "ai": 1}).values.astype(float)
+    return col.values.astype(float)
+
+y_tv = parse_label(tv_df["label"])
+y_ts = parse_label(ts_df["label"])
 
 # Load features
 try:
