@@ -103,25 +103,23 @@ def parse_label(col):
 y_tv = parse_label(tv_df["label"])
 y_ts = parse_label(ts_df["label"])
 
-log("Training ML Language Inference Model...")
+log("Training ML Language Inference Model (using 50k subset to prevent OOM)...")
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import SGDClassifier
-import re
 
 def clean_code(codes):
-    cleaned = []
-    for c in codes:
-        # Strip AI markdown enclosures
-        c = re.sub(r"```[a-zA-Z#+]*\n", "", str(c))
-        c = c.replace("```", "")
-        cleaned.append(c)
-    return np.array(cleaned)
+    return [str(c).replace("```", "") for c in codes]
 
 lang_vect = TfidfVectorizer(max_features=10000, analyzer='char_wb', ngram_range=(3,5))
 
-# Learn structural patterns
-X_lang_tv = lang_vect.fit_transform(clean_code(tv_df["code"].fillna("").values))
-tv_families_target = map_to_family(tv_df["language"].astype(str).values)
+# Learn structural patterns on a safe 50k subset to prevent RAM explosion
+np.random.seed(42)
+sample_idx = np.random.choice(len(tv_df), min(50000, len(tv_df)), replace=False)
+subset_codes = tv_df["code"].fillna("").values[sample_idx]
+subset_langs = tv_df["language"].astype(str).values[sample_idx]
+
+X_lang_tv = lang_vect.fit_transform(clean_code(subset_codes))
+tv_families_target = map_to_family(subset_langs)
 
 lang_clf = SGDClassifier(loss='log_loss', max_iter=20, n_jobs=-1, random_state=42)
 lang_clf.fit(X_lang_tv, tv_families_target)
