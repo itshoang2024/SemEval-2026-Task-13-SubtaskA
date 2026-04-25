@@ -507,8 +507,8 @@ for rank, (fname, gain) in enumerate(target_ranking):
     tag = " ✓ SELECTED" if rank < 15 else ""
     log(f"    {rank+1:2d}. {fname:25s} gain={gain:10.1f}  cum={pct:5.1f}%{tag}")
 
-# Keep top 15
-TOP_N = 15
+# Keep top 30
+TOP_N = min(30, len(target_ranking))
 selected_features = [f for f, _ in target_ranking[:TOP_N]]
 log(f"\n  Selected top {TOP_N}: {selected_features}")
 
@@ -528,175 +528,41 @@ plt.show()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 4.5: GOLD CHECK — Cumulative Validation on test_sample (OOD)
+# STEP 5: SAVE FINAL RAW RATIO FEATURES (No Scaling)
 # ═══════════════════════════════════════════════════════════════════════════════
-divider("Step 4.5 · Gold check — OOD Subset Selection")
-
-candidate_pool = [f for f, _ in target_ranking] 
-best_f1 = 0.0
-best_subset = []
-
-log("Testing Cumulative Feature Subsets on unseen OOD data (test_sample)...")
-# We test Top 5, 8, 10, 12, 15, 20, 25 features to see which group performs best collectively.
-subset_sizes = [5, 8, 10, 12, 15, 18, 20, 25, 30]
-
-for size in subset_sizes:
-    if size > len(candidate_pool): break
-    
-    test_set = candidate_pool[:size]
-    X_tr = df_feat_train[test_set].values.astype(np.float32)
-    X_va = df_feat_ts[test_set].values.astype(np.float32)
-    
-    model = lgb.LGBMClassifier(
-        n_estimators=300, max_depth=6, num_leaves=63,
-        subsample=0.8, colsample_bytree=0.8,
-        random_state=42, verbose=-1, n_jobs=-1,
-    )
-    # Early stop on validation wrapper (using 20% of train) to avoid overfitting the entire 600k 
-    # and to get a slightly generalizable tree forest:
-    np.random.seed(42)
-    val_idx = np.random.choice(len(X_tr), int(len(X_tr)*0.1), replace=False)
-    tr_idx  = np.setdiff1d(np.arange(len(X_tr)), val_idx)
-    
-    model.fit(X_tr[tr_idx], y_train[tr_idx], 
-              eval_set=[(X_tr[val_idx], y_train[val_idx])],
-              callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(0)])
-              
-    probs = model.predict_proba(X_va)[:, 1]
-    f1 = f1_score(y_ts, (probs > 0.5).astype(int), average="macro")
-    
-    log(f"  Top {size:2d} features | F1: {f1:.4f}")
-    if f1 > best_f1:
-        best_f1 = f1
-        best_subset = test_set
-
-selected_features = best_subset
-log(f"\n  Final selected optimal subset: Top {len(selected_features)} features (Gold F1 = {best_f1:.4f})")
-
-log(f"\n  Validating Per-Language F1 Matrix for optimal {len(selected_features)} features:")
-X_train_selected = df_feat_train[selected_features].values.astype(np.float32)
-X_ts_selected    = df_feat_ts[selected_features].values.astype(np.float32)
-
-gold_model = lgb.LGBMClassifier(
-    n_estimators=300, max_depth=6, num_leaves=63,
-    subsample=0.8, colsample_bytree=0.8,
-    random_state=42, verbose=-1, n_jobs=-1,
-)
-gold_model.fit(X_train_selected, y_train)
-gold_probs = gold_model.predict_proba(X_ts_selected)[:, 1]
-gold_preds = (gold_probs > 0.5).astype(int)
-
-gold_f1 = f1_score(y_ts, gold_preds, average="macro")
-gold_auc = roc_auc_score(y_ts, gold_probs)
-
-log(f"  GOLD CHECK — Overall: F1={gold_f1:.4f}  AUC={gold_auc:.4f}")
-for lang in sorted(ts_df["language"].unique()):
-    mask = (ts_langs == lang)
-    if mask.sum() < 2: continue
-    lang_f1 = f1_score(y_ts[mask], gold_preds[mask], average="macro")
-    seen_tag = "SEEN" if lang in set(tv_df["language"].unique()) else "UNSEEN"
-    log(f"    {lang:12s}: F1={lang_f1:.4f}  n={mask.sum():>4d}  [{seen_tag}]")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 5: PER-LANGUAGE NORMALIZATION + SAVE
-# ═══════════════════════════════════════════════════════════════════════════════
-divider("Step 5 · Transductive Per-family Normalization + save")
+divider(f"Step 5 · Save Selected {len(selected_features)} Ratio Features")
 
 X_train_final = df_feat_train[selected_features].values.astype(np.float32)
-X_ts_final    = df_feat_ts[selected_features].values.astype(np.float32)
 X_test_final  = df_feat_test[selected_features].values.astype(np.float32)
+X_ts_final    = df_feat_ts[selected_features].values.astype(np.float32)
 
-# Phân loại họ ngôn ngữ cho tất cả tập dữ liệu
-train_fams = np.array([infer_family_from_code(c) for c in tv_codes])
-ts_fams    = np.array([infer_family_from_code(c) for c in ts_codes])
-test_fams  = np.array([infer_family_from_code(c) for c in test_codes])
+np.save(DATA_DIR / "train_handcraft.npy", X_train_final)
+np.save(DATA_DIR / "test_handcraft.npy", X_test_final)
+np.save(DATA_DIR / "test_sample_handcraft.npy", X_ts_final)
 
-all_fams = np.unique(np.concatenate([train_fams, test_fams]))
-
-scalers = {}
-for fam in all_fams:
-    sc = StandardScaler()
-    mask_tr = (train_fams == fam)
-    
-    if mask_tr.sum() > 1000:
-        # Nhóm ngôn ngữ có mặt trong train (Python, JVM_ISH, C_CPP)
-        sc.fit(X_train_final[mask_tr])
-        log(f"  Scaler [{fam:10s}]: fit on TRAIN ({mask_tr.sum():>8,} rows)")
-    else:
-        # NGĂN CHẶN DATA SKEW: Transductive scaling cho unseen family (SCRIPTING)
-        mask_te = (test_fams == fam)
-        if mask_te.sum() > 0:
-            sc.fit(X_test_final[mask_te])
-            log(f"  Scaler [{fam:10s}]: fit on TEST (Transductive, {mask_te.sum():>8,} rows)")
-        else:
-            # Fallback
-            sc.fit(X_train_final)
-            log(f"  Scaler [{fam:10s}]: fit on GLOBAL TRAIN (Fallback)")
-            
-    scalers[fam] = sc
-
-# Apply transform
-X_train_normed = np.empty_like(X_train_final)
-for fam in np.unique(train_fams):
-    X_train_normed[train_fams == fam] = scalers[fam].transform(X_train_final[train_fams == fam])
-
-X_ts_normed = np.empty_like(X_ts_final)
-for fam in np.unique(ts_fams):
-    X_ts_normed[ts_fams == fam] = scalers[fam].transform(X_ts_final[ts_fams == fam])
-
-X_test_normed = np.empty_like(X_test_final)
-for fam in np.unique(test_fams):
-    X_test_normed[test_fams == fam] = scalers[fam].transform(X_test_final[test_fams == fam])
-
-# Save
-np.save(OUT_DIR / "train_handcraft.npy", X_train_normed)
-np.save(OUT_DIR / "test_handcraft.npy", X_test_normed)
-np.save(OUT_DIR / "test_sample_handcraft.npy", X_ts_normed)
-
-# Save metadata
-meta = {
-    "selected_features": selected_features,
-    "n_features": len(selected_features),
-    "lolo_results": {k: {kk: round(float(vv), 4) for kk, vv in v.items()}
-                     for k, v in lolo_results.items()},
-    "gold_check_f1": round(float(gold_f1), 4),
-}
-with open(OUT_DIR / "feature_meta.json", "w") as f:
-    json.dump(meta, f, indent=2)
+with open(DATA_DIR / "feature_meta.json", "w") as f:
+    json.dump({
+        "n_features": len(selected_features),
+        "features": selected_features,
+        "date_created": "2026-04-25"
+    }, f, indent=2)
 
 log(f"\n  Saved:")
-log(f"    train_handcraft.npy        {X_train_normed.shape}")
-log(f"    test_handcraft.npy         {X_test_normed.shape}")
-log(f"    test_sample_handcraft.npy  {X_ts_normed.shape}")
+log(f"    train_handcraft.npy        {X_train_final.shape}")
+log(f"    test_handcraft.npy         {X_test_final.shape}")
+log(f"    test_sample_handcraft.npy  {X_ts_final.shape}")
 log(f"    feature_meta.json")
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# FINAL SUMMARY
-# ═══════════════════════════════════════════════════════════════════════════════
+t1 = time.time()
 divider("02_features.py — Final Summary")
-
-total_time = (time.time() - T0) / 60
-print(f"""
-  PIPELINE SUMMARY
-  ════════════════
-  Step 1: Extracted {len(CANDIDATE_FEATURES)} features from {len(tv_codes)+len(test_codes)+len(ts_codes):,} samples
-  Step 2: Correlation filter (>0.90) → dropped {len(to_drop_corr)} ({len(CANDIDATE_FEATURES)} → {len(CANDIDATE_FEATURES)-len(to_drop_corr)})
-  Step 3: Adversarial filter → dropped {len(to_drop_adv)} (AUC={adv_auc:.4f})
-  Step 4: Target gain LOLO → kept top {len(selected_features)}
-          LOLO F1: {', '.join(f'{k}={v["f1"]:.4f}' for k, v in lolo_results.items())}
-  Step 4.5: Gold check F1 = {gold_f1:.4f} {'✅ PASS' if gold_f1 >= 0.60 else '❌ FAIL'}
-  Step 5: Per-language normalization + saved
-
-  FINAL {len(selected_features)} FEATURES:
-  {selected_features}
-
-  OUTPUT FILES:
-    train_handcraft.npy        {X_train_normed.shape}
-    test_handcraft.npy         {X_test_normed.shape}
-    test_sample_handcraft.npy  {X_ts_normed.shape}
-    feature_meta.json
-
-  Total time: {total_time:.1f} min
-""")
+log(f"  PIPELINE SUMMARY")
+log(f"  ════════════════")
+log(f"  Step 1: Extracted {len(df_feat_train.columns)-1} features from {len(df_feat_train)+len(df_feat_test)+len(df_feat_ts):,} samples")
+log(f"  Step 2: Correlation filter (>0.90) → dropped {len(df_feat_train.columns)-1 - len(feat_cols)}")
+log(f"  Step 3: Adversarial filter → dropped {len(to_drop_adv)} (AUC={adv_auc:.4f})")
+log(f"  Step 4: Target gain LOLO → kept top {len(selected_features)}")
+log(f"")
+log(f"  FINAL {len(selected_features)} FEATURES:")
+log(f"  {selected_features}")
+log(f"")
+log(f"  Total time: {(t1-T0)/60:.1f} min\n")

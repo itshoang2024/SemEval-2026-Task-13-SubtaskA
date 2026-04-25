@@ -113,11 +113,25 @@ try:
     X_tv = np.load(FEAT_DIR / "train_handcraft.npy")
     X_ts = np.load(FEAT_DIR / "test_sample_handcraft.npy")
     X_te = np.load(FEAT_DIR / "test_handcraft.npy")
+    
+    # Track 1 Integration (TF-IDF probabilities)
+    try:
+        X_tv_tfidf = np.load(OUT_DIR / "train_tfidf.npy")
+        X_ts_tfidf = np.load(OUT_DIR / "test_sample_tfidf.npy")
+        X_te_tfidf = np.load(OUT_DIR / "test_tfidf.npy")
+        
+        X_tv = np.hstack([X_tv, X_tv_tfidf])
+        X_ts = np.hstack([X_ts, X_ts_tfidf])
+        X_te = np.hstack([X_te, X_te_tfidf])
+        log("Successfully integrated TF-IDF Semantic Track probabilities (+1 feature).")
+    except FileNotFoundError:
+        log("⚠ TF-IDF Track features absent. Using only Handcrafted Track features.")
+        
 except FileNotFoundError:
     log("⚠ Cannot find precomputed features. Creating random dummy features for architecture testing...")
-    X_tv = np.random.randn(len(y_tv), 15).astype(np.float32)
-    X_ts = np.random.randn(len(y_ts), 15).astype(np.float32)
-    X_te = np.random.randn(len(test_df), 15).astype(np.float32)
+    X_tv = np.random.randn(len(y_tv), 30).astype(np.float32)
+    X_ts = np.random.randn(len(y_ts), 30).astype(np.float32)
+    X_te = np.random.randn(len(test_df), 30).astype(np.float32)
 
 log(f"Train/Val: {X_tv.shape} | Test Sample: {X_ts.shape} | Test: {X_te.shape}")
 
@@ -290,53 +304,7 @@ log(f"    Macro F1 on test_sample: {initial_f1:.4f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. PROGRESSIVE PSEUDO-LABELING (STRATIFIED)
-# ═══════════════════════════════════════════════════════════════════════════════
-divider("Stratified Pseudo-labeling (per-family)")
-
-def get_pseudo_mask(test_probs, test_fams, percent_top=0.05, prob_bounds=(0.05, 0.95)):
-    # Phải thỏa mãn CẢ nằm ở prob_bounds VÀ top k% trong họ
-    mask = np.zeros(len(test_probs), dtype=bool)
-    for fam in np.unique(test_fams):
-        fam_idx = np.where(test_fams == fam)[0]
-        if len(fam_idx) == 0: continue
-        
-        # Human side
-        fam_probs = test_probs[fam_idx]
-        bound_h = max(prob_bounds[0], np.percentile(fam_probs, percent_top * 100))
-        # AI side
-        bound_a = min(prob_bounds[1], np.percentile(fam_probs, 100 - percent_top * 100))
-        
-        selected_fam_idx = fam_idx[(fam_probs <= bound_h) | (fam_probs >= bound_a)]
-        mask[selected_fam_idx] = True
-    return mask
-
-pseudo_mask = get_pseudo_mask(test_probs_initial, test_families, percent_top=0.05)
-log(f"  Round 1: Pseudo-labeled {pseudo_mask.sum():,} samples form 500k test.")
-
-X_pseudo = X_te[pseudo_mask]
-y_pseudo = test_probs_initial[pseudo_mask] # Soft labels
-
-# Re-train one final model utilizing ALL 600k train data + pseudo labels 
-X_full_tr = np.vstack([X_tv, X_pseudo])
-y_full_tr = np.concatenate([y_tv, y_pseudo])
-
-log(f"  Retraining final model on {X_full_tr.shape[0]:,} samples (includes pseudo-labels)")
-# We DO NOT use test_sample for early stopping now to avoid over-bending 600k to 1000 elements.
-# Instead, we just use a fixed number of iterations (e.g. 500) for robustness.
-models_final = train_ensemble(X_full_tr, y_full_tr, is_soft=True, best_iters=500)
-
-# Generate final test probabilities
-test_probs_final = predict_ensemble(models_final, X_te)
-
-# Estimate improvements by predicting back on X_ts (although it was in train, it's a relative indicator)
-y_ts_repred = predict_ensemble(models_final, X_ts)
-pseudo_f1 = f1_score(y_ts, (y_ts_repred > 0.5).astype(int), average="macro")
-log(f"    Macro F1 on test_sample (post-pseudo): {pseudo_f1:.4f}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 5. PER-FAMILY THRESHOLD CALIBRATION
+# 4. PER-FAMILY THRESHOLD CALIBRATION
 # ═══════════════════════════════════════════════════════════════════════════════
 divider("Per-family Threshold Calibration")
 
@@ -374,14 +342,14 @@ else:
     log(f"  Global calibration: selected threshold {best_t:.2f} (F1={best_f1:.4f})")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6. SUBMISSION
+# 5. SUBMISSION
 # ═══════════════════════════════════════════════════════════════════════════════
 divider("Generate Submission")
 
-test_preds = np.zeros(len(test_probs_final), dtype=int)
+test_preds = np.zeros(len(test_probs_initial), dtype=int)
 for fam, t in thresholds.items():
     fam_idx = np.where(test_families == fam)[0]
-    test_preds[fam_idx] = (test_probs_final[fam_idx] > t).astype(int)
+    test_preds[fam_idx] = (test_probs_initial[fam_idx] > t).astype(int)
 
 ai_ratio = test_preds.mean()
 log(f"  Final AI ratio on 500k test set: {ai_ratio:.2%}")
