@@ -158,19 +158,18 @@ test_families = np.array([infer_family_from_code(c) for c in test_codes])
 # 2. MODEL CONFIGURATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 def train_lgb(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=None, is_soft=False, best_iters=None):
-    model = lgb.LGBMClassifier(
+    params = dict(
         objective="binary",
         n_estimators=best_iters if best_iters else 1000,
         learning_rate=0.03,
-        num_leaves=63,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
-        verbosity=-1,
-        n_jobs=-1
+        max_depth=6, num_leaves=63,
+        subsample=0.8, colsample_bytree=0.8,
+        random_state=42, verbose=-1, n_jobs=-1
     )
+    model = lgb.LGBMRegressor(**params) if is_soft else lgb.LGBMClassifier(**params)
+    
     if not is_soft and X_va_in is not None:
-        callbacks = [lgb.early_stopping(50, first_metric_only=True, verbose=False), lgb.log_evaluation(0)]
+        callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(100)]
         model.fit(X_tr, y_tr, eval_set=[(X_va_in, y_va_in), (X_va_out, y_va_out)], callbacks=callbacks)
     else:
         model.fit(X_tr, y_tr)
@@ -197,8 +196,7 @@ def train_xgb(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=No
 
 def train_cat(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=None, is_soft=False, best_iters=None):
     if cb is None: return None
-    model = cb.CatBoostClassifier(
-        loss_function="CrossEntropy",
+    params = dict(
         iterations=best_iters if best_iters else 1000,
         learning_rate=0.03,
         depth=6,
@@ -206,6 +204,11 @@ def train_cat(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=No
         verbose=0,
         thread_count=-1
     )
+    if is_soft:
+        model = cb.CatBoostRegressor(loss_function="RMSE", **params)
+    else:
+        model = cb.CatBoostClassifier(loss_function="CrossEntropy", **params)
+        
     if not is_soft and X_va_in is not None:
         model.fit(X_tr, y_tr, eval_set=(X_va_in, y_va_in), early_stopping_rounds=50)
     else:
