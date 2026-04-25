@@ -109,13 +109,13 @@ from sklearn.linear_model import SGDClassifier
 
 log("Training ML Language Inference Model...")
 lang_vect = HashingVectorizer(n_features=10000, analyzer='word', ngram_range=(1,2))
-X_lang_tv = lang_vect.fit_transform(tv_df["code"].fillna("").astype(str).values)
+X_lang_tv = lang_vect.fit_transform(tv_df["text"].fillna("").astype(str).values)
 
 lang_clf = SGDClassifier(loss='log_loss', max_iter=20, n_jobs=-1, random_state=42)
 lang_clf.fit(X_lang_tv, tv_df["language"].astype(str).values)
 
 log("Evaluating Inference Accuracy on test_sample...")
-X_lang_ts = lang_vect.transform(ts_df["code"].fillna("").astype(str).values)
+X_lang_ts = lang_vect.transform(ts_df["text"].fillna("").astype(str).values)
 predicted_ts_langs = lang_clf.predict(X_lang_ts)
 
 ts_predicted_families = map_to_family(predicted_ts_langs)
@@ -128,7 +128,7 @@ use_per_family = acc >= 0.85
 if use_per_family: log("✓ Accuracy >= 0.85 → Enabling Per-family tracking.")
     
 log("Inferring language family for 500k test samples...")
-X_lang_te = lang_vect.transform(test_df["code"].fillna("").astype(str).values)
+X_lang_te = lang_vect.transform(test_df["text"].fillna("").astype(str).values)
 test_families = map_to_family(lang_clf.predict(X_lang_te))
 
 tv_families = map_to_family(tv_df["language"].astype(str).values)
