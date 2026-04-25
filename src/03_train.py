@@ -108,18 +108,19 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import SGDClassifier
 
 log("Training ML Language Inference Model...")
-# Use TfidfVectorizer (with IDF) instead of Hashing to eliminate noise from common keywords ("if", "else")
-lang_vect = TfidfVectorizer(max_features=5000, analyzer='word', ngram_range=(1,2))
+# Use char_wb to capture syntax symbols like '{', '::', '->' ignoring variable names
+lang_vect = TfidfVectorizer(max_features=15000, analyzer='char_wb', ngram_range=(3,5))
 X_lang_tv = lang_vect.fit_transform(tv_df["code"].fillna("").astype(str).values)
 
+# Map target to FAMILIES, not raw languages! That way it clusters unseen languages accurately.
+tv_families_target = map_to_family(tv_df["language"].astype(str).values)
 lang_clf = SGDClassifier(loss='log_loss', max_iter=20, n_jobs=-1, random_state=42)
-lang_clf.fit(X_lang_tv, tv_df["language"].astype(str).values)
+lang_clf.fit(X_lang_tv, tv_families_target)
 
 log("Evaluating Inference Accuracy on test_sample...")
 X_lang_ts = lang_vect.transform(ts_df["code"].fillna("").astype(str).values)
-predicted_ts_langs = lang_clf.predict(X_lang_ts)
+ts_predicted_families = lang_clf.predict(X_lang_ts)
 
-ts_predicted_families = map_to_family(predicted_ts_langs)
 ts_actual_families = map_to_family(ts_df["language"].astype(str).values)
 
 acc = np.mean(ts_predicted_families == ts_actual_families)
@@ -130,7 +131,7 @@ if use_per_family: log("✓ Accuracy >= 0.85 → Enabling Per-family tracking.")
     
 log("Inferring language family for 500k test samples...")
 X_lang_te = lang_vect.transform(test_df["code"].fillna("").astype(str).values)
-test_families = map_to_family(lang_clf.predict(X_lang_te))
+test_families = lang_clf.predict(X_lang_te)
 
 tv_families = map_to_family(tv_df["language"].astype(str).values)
 
