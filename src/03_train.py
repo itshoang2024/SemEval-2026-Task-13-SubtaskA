@@ -202,7 +202,7 @@ log(f"Final Matrix => Train/Val: {X_tv.shape} | Test Sample: {X_ts.shape} | Test
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. MODEL CONFIGURATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
-def train_lgb(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=None, is_soft=False, best_iters=None):
+def train_lgb(X_tr, y_tr, X_va_in=None, y_va_in=None, is_soft=False, best_iters=None):
     params = dict(
         objective="binary",
         n_estimators=best_iters if best_iters else 1000,
@@ -215,12 +215,12 @@ def train_lgb(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=No
     
     if not is_soft and X_va_in is not None:
         callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(100)]
-        model.fit(X_tr, y_tr, eval_set=[(X_va_in, y_va_in), (X_va_out, y_va_out)], callbacks=callbacks)
+        model.fit(X_tr, y_tr, eval_set=[(X_va_in, y_va_in)], callbacks=callbacks)
     else:
         model.fit(X_tr, y_tr)
     return model
 
-def train_xgb(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=None, is_soft=False, best_iters=None):
+def train_xgb(X_tr, y_tr, X_va_in=None, y_va_in=None, is_soft=False, best_iters=None):
     model = xgb.XGBRegressor(
         objective="binary:logistic",
         n_estimators=best_iters if best_iters else 1000,
@@ -234,12 +234,12 @@ def train_xgb(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=No
         n_jobs=-1
     )
     if not is_soft and X_va_in is not None:
-        model.fit(X_tr, y_tr, eval_set=[(X_va_in, y_va_in), (X_va_out, y_va_out)], verbose=False)
+        model.fit(X_tr, y_tr, eval_set=[(X_va_in, y_va_in)], verbose=False)
     else:
         model.fit(X_tr, y_tr, verbose=False)
     return model
 
-def train_cat(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=None, is_soft=False, best_iters=None):
+def train_cat(X_tr, y_tr, X_va_in=None, y_va_in=None, is_soft=False, best_iters=None):
     if cb is None: return None
     params = dict(
         iterations=best_iters if best_iters else 1000,
@@ -260,10 +260,10 @@ def train_cat(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=No
         model.fit(X_tr, y_tr)
     return model
 
-def train_ensemble(X_tr, y_tr, X_va_in=None, y_va_in=None, X_va_out=None, y_va_out=None, is_soft=False, best_iters=None):
-    m_lgb = train_lgb(X_tr, y_tr, X_va_in, y_va_in, X_va_out, y_va_out, is_soft, best_iters)
-    m_xgb = train_xgb(X_tr, y_tr, X_va_in, y_va_in, X_va_out, y_va_out, is_soft, best_iters)
-    m_cat = train_cat(X_tr, y_tr, X_va_in, y_va_in, X_va_out, y_va_out, is_soft, best_iters)
+def train_ensemble(X_tr, y_tr, X_va_in=None, y_va_in=None, is_soft=False, best_iters=None):
+    m_lgb = train_lgb(X_tr, y_tr, X_va_in, y_va_in, is_soft, best_iters)
+    m_xgb = train_xgb(X_tr, y_tr, X_va_in, y_va_in, is_soft, best_iters)
+    m_cat = train_cat(X_tr, y_tr, X_va_in, y_va_in, is_soft, best_iters)
     return m_lgb, m_xgb, m_cat
 
 def predict_ensemble(models, X):
@@ -284,38 +284,24 @@ divider("Training with Honest CV (LOLO + Stratified)")
 ts_preds_fold = np.zeros((len(X_ts), 3))
 test_preds_fold = np.zeros((len(X_te), 3))
 
-tv_langs = tv_df["language"].astype(str).str.lower().values
+from sklearn.model_selection import StratifiedKFold
 
-# Generate 3 folds
-# Fold 0: Validate on Python (from tv) 
-# Fold 1: Validate on Java (from tv)
-# Fold 2: Validate on C++ (from tv)
-fold_langs = ["python", "java", "c++"]
+n_splits = 5
+skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
-for i in range(3):
-    f_lang = fold_langs[i]
-    val_tv_mask = (tv_langs == f_lang)
-    tr_tv_mask  = ~val_tv_mask
+ts_preds_fold = np.zeros((len(X_ts), n_splits))
+test_preds_fold = np.zeros((len(X_te), n_splits))
+
+for i, (train_idx, val_idx) in enumerate(skf.split(X_tv, y_tv)):
+    X_tr, y_tr = X_tv[train_idx], y_tv[train_idx]
+    X_va_in, y_va_in = X_tv[val_idx], y_tv[val_idx]
     
-    X_tr = X_tv[tr_tv_mask]
-    y_tr = y_tv[tr_tv_mask]
+    log(f"  Fold {i+1}/{n_splits}: Train {X_tr.shape[0]:,} | Val {X_va_in.shape[0]:,}")
     
-    # Validation In (Nội bộ dùng cho Early Stopping chi phối tree split)
-    X_va_in = X_tv[val_tv_mask]
-    y_va_in = y_tv[val_tv_mask]
+    # Train robust generic structural models with early stopping on Val
+    models = train_ensemble(X_tr, y_tr, X_va_in, y_va_in)
     
-    # Evaluate early stopping directly on entirety of test_sample to prevent OOD leakage
-    X_va_out = X_ts
-    y_va_out = y_ts
-    
-    log(f"  Fold {f_lang}: Train {X_tr.shape[0]:,} | Val-In {X_va_in.shape[0]:,} | Val-Out {X_va_out.shape[0]:,}")
-    
-    models = train_ensemble(X_tr, y_tr, X_va_in, y_va_in, X_va_out, y_va_out)
-    
-    # Eval full test_sample to maintain identically squashed predictions as test set
     ts_preds_fold[:, i] = predict_ensemble(models, X_ts)
-    
-    # Test predict
     test_preds_fold[:, i] = predict_ensemble(models, X_te)
 
 y_ts_oof = ts_preds_fold.mean(axis=1)
