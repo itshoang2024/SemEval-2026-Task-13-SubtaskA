@@ -273,35 +273,28 @@ def extract_raw(code: str) -> dict:
 
     f["line_len_iqr"] = float(np.percentile(line_lengths, 75) - np.percentile(line_lengths, 25)) if line_lengths else 0.0
 
-    # ── Style/naming axis (12) ───────────────────────────────────────────
-    identifiers = [t for t in tokens if t.lower() not in KEYWORDS and not t.isdigit() and len(t) > 1]
-
-    if identifiers:
-        id_lens = [len(t) for t in identifiers]
-        f["avg_id_len"]  = float(np.mean(id_lens))
-        f["id_len_std"]  = float(np.std(id_lens)) if len(id_lens) > 1 else 0.0
-        f["long_id_ratio"]   = sum(1 for l in id_lens if l > 15) / len(identifiers)
-        f["single_char_ratio"] = sum(1 for t in identifiers if len(t) == 1) / len(identifiers)
+    # ── Compression/Entropy Boosts (Language Agnostic) ───────────────────
+    if len(code_bytes) > 0:
+        import bz2, lzma
+        compressed_bz2 = bz2.compress(code_bytes, compresslevel=9)
+        f["bz2_ratio"] = len(compressed_bz2) / len(code_bytes)
+        
+        try:
+            compressed_lzma = lzma.compress(code_bytes)
+            f["lzma_ratio"] = len(compressed_lzma) / len(code_bytes)
+        except Exception:
+            f["lzma_ratio"] = f["bz2_ratio"] # Fallback
     else:
-        f["avg_id_len"] = 0.0
-        f["id_len_std"] = 0.0
-        f["long_id_ratio"] = 0.0
-        f["single_char_ratio"] = 0.0
+        f["bz2_ratio"] = 0.0
+        f["lzma_ratio"] = 0.0
 
-    has_snake = bool(SNAKE_RE.search(code))
-    has_camel = bool(CAMEL_RE.search(code))
-    f["naming_consistency"] = 0.0 if (has_snake and has_camel) else (1.0 if (has_snake or has_camel) else 0.5)
-
-    f["kw_density"]    = sum(1 for t in tokens if t.lower() in KEYWORDS) / n_tokens
     f["num_density"]   = len(re.findall(r"\b\d+\b", code)) / n_tokens
+    
+    # Generic string literals density
     f["str_lit_density"] = (len(re.findall(r'"(?:[^"\\]|\\.)*"', code)) +
                             len(re.findall(r"'(?:[^'\\]|\\.)*'", code))) / n_lines
-    func_kw = {'def', 'function', 'void', 'func', 'fn', 'sub', 'proc'}
-    f["func_def_density"] = sum(1 for t in tokens if t.lower() in func_kw) / n_lines
+                            
     f["op_density"]    = len(re.findall(r"[+\-*/%=<>!&|^~]", code)) / n_chars
-    f["import_density"] = len(re.findall(
-        r"^\s*(import |from .+ import|#include|using |require\(|require |include |use )",
-        code, re.MULTILINE)) / n_lines
     punc = set('!@#$%^&*(),.?":{}\|<>[]\\;\'\`~-+=/')
     f["punc_ratio"] = sum(1 for c in code if c in punc) / n_chars
 

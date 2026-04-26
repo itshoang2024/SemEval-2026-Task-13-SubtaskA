@@ -67,35 +67,6 @@ log(f"Test texts:       {X_te_text.shape[0]:,}")
 del train_df, val_df, ts_df, test_df
 gc.collect()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2. FIT TF-IDF
-# ═══════════════════════════════════════════════════════════════════════════════
-divider("Extracting Sparse Semantic Features (TF-IDF)")
-
-# Character n-grams implicitly track code structure, boilerplate padding, 
-# python def vs java public static, space behaviors, brackets logic.
-tfidf = TfidfVectorizer(
-    analyzer='char_wb',
-    ngram_range=(3, 5),   # 3 to 5 character sweeping
-    max_features=30000,   # Keep top 30k most robust tokens to fit in RAM
-    min_df=5,             # Must appear in 5 files minimum
-    max_df=0.6,           # Skip extremely generic tokens present in 60% docs
-    lowercase=False,      # Case sensitive is VITAL for CamelCase vs snake_case tracking
-    dtype=np.float32,
-)
-
-log("Fitting Vectorizer on Train/Val... (May take a few minutes)")
-# Fit purely on train to prevent any test leakage
-X_tv_sparse = tfidf.fit_transform(X_tv_text)
-log(f"  Train/Val Sparse Matrix bounds: {X_tv_sparse.shape}")
-
-log("Transforming Test & Test_Sample sets...")
-X_ts_sparse = tfidf.transform(X_ts_text)
-X_te_sparse = tfidf.transform(X_te_text)
-
-log(f"  Test Sample Sparse bounds: {X_ts_sparse.shape}")
-log(f"  Test Sparse bounds:        {X_te_sparse.shape}")
-
 import re
 from sklearn.decomposition import TruncatedSVD
 
