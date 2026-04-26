@@ -279,7 +279,7 @@ ai_ratio = test_preds.mean()
 log(f"  Final AI ratio on 500k test set: {ai_ratio:.2%}")
 
 sub = pd.DataFrame({
-    "id": test_df["id"] if "id" in test_df.columns else test_df["ID"] if "ID" in test_df.columns else test_df.index,
+    "ID": test_df["id"] if "id" in test_df.columns else test_df["ID"] if "ID" in test_df.columns else test_df.index,
     "label": test_preds
 })
 sub_file = OUT_DIR / "submission.csv"
