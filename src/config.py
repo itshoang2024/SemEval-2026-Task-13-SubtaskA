@@ -74,26 +74,26 @@ class PipelineConfig:
     ])
     ppl_max_tokens: int = 128
     ppl_batch_size: int = 128
-    ppl_train_subsample: int = 150_000
-    ppl_time_budget_sec: int = 25_200  # 7 hours
+    ppl_train_subsample: int = 50_000
+    ppl_time_budget_sec: int = 23_400  # 6.5 hours
 
     # --- Stacking Meta-Learner ---
-    n_folds: int = 5
-    meta_lr: float = 0.05
-    meta_max_iter: int = 300
-    meta_max_leaf_nodes: int = 31
+    n_folds: int = 3
+    meta_lr: float = 0.02
+    meta_max_iter: int = 500
+    meta_max_leaf_nodes: int = 63
 
     # --- OOD Ratio Tuning ---
-    ratio_floor: float = 0.10
-    ratio_ceil: float = 0.40
+    ratio_floor: float = 0.05
+    ratio_ceil: float = 0.50
     global_ratio_grid: np.ndarray = field(
-        default_factory=lambda: np.arange(0.10, 0.41, 0.01)
+        default_factory=lambda: np.arange(0.05, 0.51, 0.01)
     )
     lang_ratio_grid: np.ndarray = field(
-        default_factory=lambda: np.arange(0.05, 0.41, 0.01)
+        default_factory=lambda: np.arange(0.02, 0.51, 0.01)
     )
     shrink_grid: List[float] = field(
-        default_factory=lambda: [0.0, 0.25, 0.5, 0.75, 1.0]
+        default_factory=lambda: [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
     )
     fallback_global_ratio: float = 0.22
 

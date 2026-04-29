@@ -41,7 +41,7 @@ class DataIngestion:
         self.config = config
 
     def discover_data_directory(self) -> str:
-        """Recursively searches /kaggle/input for train.parquet.
+        """Recursively searches for the dataset directory.
 
         Returns:
             Absolute path to the directory containing parquet files.
@@ -49,13 +49,30 @@ class DataIngestion:
         Raises:
             FileNotFoundError: If no valid dataset directory is found.
         """
+        candidates = [
+            "/kaggle/input/semeval-2026-task13-subtask-a/Task_A",
+            "/kaggle/input/SemEval-2026-Task13-Subtask-A/Task_A",
+            "/kaggle/input/semeval-2026-task13-subtask-a/task_A",
+            "/kaggle/input/competitions/sem-eval-2026-task-13-subtask-a/Task_A",
+            "/kaggle/input/semeval-2026-task13/task_A",
+            "/kaggle/input/semeval-2026-task13/Task_A",
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+
         if os.path.exists("/kaggle/input"):
             for dirpath, _, filenames in os.walk("/kaggle/input"):
                 if "train.parquet" in filenames:
                     return dirpath
+
+        local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+        if os.path.exists(os.path.join(local_path, "train.parquet")):
+            return local_path
+
         raise FileNotFoundError(
             "Could not auto-discover dataset. "
-            "Add the competition data as a Kaggle input source."
+            "Add the competition data as a Kaggle input source or place it in the ../data/ directory."
         )
 
     def load_splits(

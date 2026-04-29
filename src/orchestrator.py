@@ -331,7 +331,8 @@ class CAMSPipeline:
         meta = HistGradientBoostingClassifier(
             learning_rate=self.cfg.meta_lr, max_iter=self.cfg.meta_max_iter,
             max_leaf_nodes=self.cfg.meta_max_leaf_nodes, min_samples_leaf=50,
-            l2_regularization=1.0, random_state=self.cfg.seed,
+            l2_regularization=1.0, early_stopping=True, validation_fraction=0.1,
+            n_iter_no_change=20, random_state=self.cfg.seed,
         )
         meta.fit(Xm_tr, y_train)
         meta_te = meta.predict_proba(Xm_te)[:, 1].astype(np.float32)
