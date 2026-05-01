@@ -11,7 +11,7 @@ CAMSP detects AI-generated code for SemEval 2026 Task 13 Subtask A. It is an off
 - Batch runtime: `scripts/run_inference.py` starts one end-to-end process.
 - Data boundary: parquet files are loaded from Kaggle inputs or from a local fallback under `data/`.
 - Model boundary: the LLM perplexity stage tries local Kaggle model paths first, then the HuggingFace model id in `PipelineConfig.ppl_candidates`.
-- Artifact boundary: expensive arrays are checkpointed as `.npy` files under `_ckpt`; final predictions are written as CSV.
+- Artifact boundary: expensive arrays are checkpointed as `.npy` files under `_ckpt`; final predictions are written as CSV and run metrics are written as JSON.
 - No service/API boundary exists. The only public runtime output is `submission.csv`.
 
 ## Module boundaries
@@ -56,7 +56,7 @@ artifact detector --------------------------------------+
 5. Style features: `CodeStyleExtractor.extract_batch()` computes compression, entropy, indentation, line, and repetition features. LLM PPL columns are appended to style feature frames before checkpointing.
 6. K-fold stacking: four base estimators produce out-of-fold train predictions and averaged test/sample predictions.
 7. Meta-learner: an HGB classifier trains on base OOF predictions plus PPL features and scores test/sample rows.
-8. Ratio tuning: `OODRatioTuner` tunes on `test_sample.parquet` when available. If `test.parquet` has no `language` column, the orchestrator retunes a global ratio and applies that to test.
+8. Ratio tuning: `OODRatioTuner` tunes on `test_sample.parquet` when available. It chooses among global, artifact-forced global, and language-aware strategies only when both sample and test language labels are reliable.
 9. Submission: `submission.csv` is written with columns `ID,label`.
 
 ## Checkpoints
@@ -64,6 +64,10 @@ artifact detector --------------------------------------+
 `src/orchestrator.py` writes `.npy` checkpoints for expensive arrays. In Kaggle, the directory is `/kaggle/working/_ckpt`; outside Kaggle, it is `/tmp/_ckpt`.
 
 Checkpoint reuse is positional and assumes compatible row ordering, feature ordering, fold count, and dataset size. If any of those change, delete stale checkpoints before rerunning.
+
+`meta_te.npy` and `meta_sa.npy` can be reused for tuning-only experiments by setting `CAMSP_TUNING_ONLY=1` or opportunistically with `CAMSP_REUSE_META_SCORES=1`. This skips PPL, style extraction, stacking, and meta-learning after data/artifact loading.
+
+`run_metrics.json` is written to the output directory and records load mode, checkpoint usage, PPL coverage, tuning config, sample F1 when available, machine ratio, and runtime.
 
 ## Current limitations
 

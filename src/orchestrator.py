@@ -11,10 +11,10 @@ v10.2 Critical Fixes:
 """
 
 import gc
+import json
 import logging
 import os
 import time
-import zlib
 
 import numpy as np
 import pandas as pd
@@ -52,6 +52,11 @@ def _ckpt_dir() -> str:
     return d
 
 
+def _out_dir() -> str:
+    """Returns output directory for Kaggle or local runs."""
+    return "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
+
+
 def _save_ckpt(name: str, arr: np.ndarray) -> None:
     """Saves a numpy array checkpoint."""
     path = os.path.join(_ckpt_dir(), f"{name}.npy")
@@ -67,6 +72,56 @@ def _load_ckpt(name: str) -> np.ndarray:
         logger.info("Checkpoint loaded: %s (%s)", path, arr.shape)
         return arr
     return None
+
+
+def _load_score_ckpt(name: str, expected_rows: int) -> np.ndarray:
+    """Loads a 1D score checkpoint and validates row count."""
+    arr = _load_ckpt(name)
+    if arr is None:
+        return None
+    if arr.ndim != 1 or len(arr) != expected_rows:
+        logger.warning(
+            "Ignoring checkpoint %s: expected shape (%d,), got %s",
+            name, expected_rows, arr.shape,
+        )
+        return None
+    return arr.astype(np.float32, copy=False)
+
+
+def _ppl_coverage(arr: np.ndarray) -> dict:
+    """Summarizes how many PPL rows contain non-zero token counts."""
+    if arr is None or len(arr) == 0:
+        return {"rows": 0, "covered": 0, "coverage": 0.0}
+    covered = int(np.count_nonzero(arr[:, -1] > 0))
+    return {
+        "rows": int(len(arr)),
+        "covered": covered,
+        "coverage": covered / max(int(len(arr)), 1),
+    }
+
+
+def _jsonable(obj):
+    """Converts numpy-heavy metric objects to JSON-safe values."""
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
+
+
+def _save_metrics(metrics: dict, path: str) -> None:
+    """Writes run metrics as JSON."""
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(_jsonable(metrics), fh, indent=2, sort_keys=True)
+    logger.info("Run metrics saved: %s", path)
 
 
 class CAMSPipeline:
@@ -103,6 +158,96 @@ class CAMSPipeline:
         """Deadline guard disabled to allow full 12h Kaggle execution."""
         pass
 
+    def _tune_save_submission(
+        self,
+        te_df: pd.DataFrame,
+        sa_df: pd.DataFrame,
+        te_langs: np.ndarray,
+        sa_langs: np.ndarray,
+        te_artifacts: np.ndarray,
+        sa_artifacts: np.ndarray,
+        meta_te: np.ndarray,
+        meta_sa: np.ndarray,
+        t_start: float,
+        metrics: dict,
+    ) -> pd.DataFrame:
+        """Tunes ratios, writes submission.csv, exports metrics, and returns it."""
+        # -- 6. Adaptive Ratio Tuning --
+        logger.info("=" * 60)
+        logger.info("PHASE 6/7: Adaptive Ratio Tuning")
+        logger.info("=" * 60)
+
+        test_has_reliable_language = self.tuner.has_reliable_languages(te_langs)
+        sample_has_reliable_language = self.tuner.has_reliable_languages(sa_langs)
+        allow_language = test_has_reliable_language and sample_has_reliable_language
+
+        if sa_df is not None and meta_sa is not None:
+            sa_lang_series = pd.Series(sa_langs).fillna("Unknown").astype(str)
+            tune_cfg = self.tuner.tune(
+                sa_df["label"].values,
+                meta_sa,
+                sa_lang_series,
+                sa_artifacts,
+                allow_language=allow_language,
+            )
+        else:
+            tune_cfg = {
+                "score": None,
+                "strategy": "global",
+                "global": self.cfg.fallback_global_ratio,
+                "l_map": {},
+                "shrink": 0.0,
+                "force_artifacts": True,
+            }
+            logger.warning("No sample scores available; using fallback tune config")
+
+        if tune_cfg["strategy"].startswith("language") and not test_has_reliable_language:
+            logger.warning("Test languages are not reliable; falling back to global prediction")
+            tune_cfg["strategy"] = "global_artifact" if tune_cfg.get("force_artifacts") else "global"
+            tune_cfg["l_map"] = {}
+            tune_cfg["shrink"] = 0.0
+
+        # -- 7. Save Submission --
+        logger.info("=" * 60)
+        logger.info("PHASE 7/7: Saving submission")
+        logger.info("=" * 60)
+
+        preds = self.tuner.predict_from_config(meta_te, tune_cfg, te_langs, te_artifacts)
+
+        id_col = "ID" if "ID" in te_df.columns else "id"
+        sub = pd.DataFrame({"ID": te_df[id_col].values, "label": preds.astype(int)})
+
+        out_dir = _out_dir()
+        out_path = os.path.join(out_dir, "submission.csv")
+        sub.to_csv(out_path, index=False)
+
+        machine_ratio = float(sub["label"].mean())
+        logger.info("Submission saved: %s", out_path)
+        logger.info(
+            "Machine ratio: %.2f%% (%d / %d)",
+            machine_ratio * 100, int(sub["label"].sum()), len(sub),
+        )
+
+        sample_f1 = None
+        if sa_df is not None and meta_sa is not None:
+            sa_preds = self.tuner.predict_from_config(meta_sa, tune_cfg, sa_langs, sa_artifacts)
+            sample_f1 = float(f1_score(sa_df["label"].values, sa_preds, average="macro"))
+            logger.info("Sample F1: %.4f", sample_f1)
+
+        total_min = (time.time() - t_start) / 60
+        logger.info("Total elapsed: %.1f minutes (%.1f hours)", total_min, total_min / 60)
+
+        metrics.update({
+            "tuning": tune_cfg,
+            "sample_f1": sample_f1,
+            "machine_ratio": machine_ratio,
+            "submission_path": out_path,
+            "total_minutes": float(total_min),
+        })
+        metrics_path = self.cfg.metrics_path or os.path.join(out_dir, "run_metrics.json")
+        _save_metrics(metrics, metrics_path)
+        return sub
+
     def run(self) -> pd.DataFrame:
         """Executes the full CAMSP pipeline end-to-end.
 
@@ -111,6 +256,16 @@ class CAMSPipeline:
         """
         set_seed(self.cfg.seed)
         t_start = time.time()
+        metrics = {
+            "ppl_load_mode": self.cfg.ppl_load_mode,
+            "reuse_meta_scores": bool(self.cfg.reuse_meta_scores),
+            "tuning_only": bool(self.cfg.tuning_only),
+            "checkpoint_usage": {
+                "ppl": False,
+                "style": False,
+                "meta": False,
+            },
+        }
 
         # ── 1. Data Loading ──
         logger.info("=" * 60)
@@ -121,6 +276,11 @@ class CAMSPipeline:
         del tr_df, va_df
         gc.collect()
         logger.info("Train+Val combined: %d samples", len(tr_full))
+        metrics["row_counts"] = {
+            "train_val": int(len(tr_full)),
+            "test": int(len(te_df)),
+            "sample": int(len(sa_df)) if sa_df is not None else 0,
+        }
 
         y_train = tr_full["label"].astype(int).values
         fw_train = GeneratorFamilyEncoder.build_weights(tr_full["generator"])
@@ -134,6 +294,27 @@ class CAMSPipeline:
         # Safe language extraction (test.parquet does NOT have 'language')
         te_langs = _safe_lang_col(te_df)
         sa_langs = _safe_lang_col(sa_df)
+
+        meta_te = None
+        meta_sa = None
+        if self.cfg.reuse_meta_scores or self.cfg.tuning_only:
+            logger.info("Trying meta score checkpoints for tuning-only workflow")
+            meta_te = _load_score_ckpt("meta_te", len(te_df))
+            if sa_df is not None:
+                meta_sa = _load_score_ckpt("meta_sa", len(sa_df))
+            if meta_te is not None and (sa_df is None or meta_sa is not None):
+                metrics["checkpoint_usage"]["meta"] = True
+                logger.info("Meta score checkpoints found; skipping PPL/style/stacking/meta phases")
+                return self._tune_save_submission(
+                    te_df, sa_df, te_langs, sa_langs, te_artifacts, sa_artifacts,
+                    meta_te, meta_sa, t_start, metrics,
+                )
+            if self.cfg.tuning_only:
+                raise FileNotFoundError(
+                    "CAMSP_TUNING_ONLY=1 requires valid meta_te.npy"
+                    " and meta_sa.npy when test_sample.parquet exists"
+                )
+            logger.warning("Meta score checkpoints incomplete; continuing full pipeline")
 
         # ── 2. LLM Perplexity (Sequential Completion) ──
         logger.info("=" * 60)
@@ -156,10 +337,26 @@ class CAMSPipeline:
                 _save_ckpt("ppl_sample", ppl_sa)
         else:
             logger.info("PPL checkpoints found — skipping LLM inference")
+            metrics["checkpoint_usage"]["ppl"] = True
             if ppl_tr is None:
                 ppl_tr = np.zeros((len(tr_full), len(LLMPerplexityEngine.FEATURE_NAMES)), dtype=np.float32)
             if ppl_sa is None and sa_df is not None:
                 ppl_sa = np.zeros((len(sa_df), len(LLMPerplexityEngine.FEATURE_NAMES)), dtype=np.float32)
+
+        metrics["ppl_coverage"] = {
+            "train": _ppl_coverage(ppl_tr),
+            "test": _ppl_coverage(ppl_te),
+            "sample": _ppl_coverage(ppl_sa) if ppl_sa is not None else None,
+        }
+        logger.info(
+            "PPL coverage -> train: %.1f%% | test: %.1f%% | sample: %s",
+            metrics["ppl_coverage"]["train"]["coverage"] * 100,
+            metrics["ppl_coverage"]["test"]["coverage"] * 100,
+            (
+                f"{metrics['ppl_coverage']['sample']['coverage'] * 100:.1f}%"
+                if metrics["ppl_coverage"]["sample"] is not None else "N/A"
+            ),
+        )
 
         self._check_deadline(t_start, "LLM Perplexity")
 
@@ -173,6 +370,7 @@ class CAMSPipeline:
 
         if X_sty_all_ckpt is not None and X_sty_te_ckpt is not None:
             logger.info("Style checkpoints found — skipping extraction")
+            metrics["checkpoint_usage"]["style"] = True
             X_sty_all = X_sty_all_ckpt
             X_sty_te = X_sty_te_ckpt
             X_sty_sa_ckpt = _load_ckpt("sty_sample")
@@ -345,73 +543,7 @@ class CAMSPipeline:
         del meta, Xm_tr, Xm_te, Xm_sa, oof
         gc.collect()
 
-        # ── 6. Adaptive Ratio Tuning ──
-        logger.info("=" * 60)
-        logger.info("PHASE 6/7: Adaptive Ratio Tuning")
-        logger.info("=" * 60)
-
-        # Tune on test_sample (which HAS language column)
-        if sa_df is not None and meta_sa is not None and sa_langs is not None:
-            sa_lang_series = pd.Series(sa_langs).fillna("Unknown").astype(str)
-            tune_cfg = self.tuner.tune(sa_df["label"].values, meta_sa, sa_lang_series, sa_artifacts)
-        else:
-            tune_cfg = {"global": self.cfg.fallback_global_ratio, "l_map": {}, "shrink": 0.5}
-
-        # ── CRITICAL FIX: Re-tune global ratio for test set WITHOUT language ──
-        # The per-language tuner finds global_ratio=0.05 (irrelevant when shrink=1.0)
-        # but test.parquet has NO language column → ALL test samples use global_ratio.
-        # We must find the optimal single ratio by treating sample as one group.
-        test_has_language = "language" in te_df.columns
-        if not test_has_language and sa_df is not None and meta_sa is not None:
-            fixed_global = self.tuner.tune_global_only(
-                sa_df["label"].values, meta_sa, sa_artifacts,
-            )
-            logger.info(
-                "Test has no language column — overriding global ratio: %.2f → %.2f",
-                tune_cfg["global"], fixed_global,
-            )
-            tune_cfg["global"] = fixed_global
-
-        # Apply predictions to test set
-        norm_scores = self.tuner.rank_normalize(meta_te)
-        if test_has_language:
-            preds = self.tuner.language_aware_predict(
-                norm_scores, te_langs, tune_cfg["global"], tune_cfg["l_map"], tune_cfg["shrink"],
-            )
-        else:
-            # No language info → use re-tuned global ratio only
-            logger.info("Test set prediction using global ratio: %.2f", tune_cfg["global"])
-            preds = self.tuner.apply_ratio(norm_scores, tune_cfg["global"])
-
-        preds[te_artifacts] = 1
-
-        # ── 7. Save Submission ──
-        logger.info("=" * 60)
-        logger.info("PHASE 7/7: Saving submission")
-        logger.info("=" * 60)
-
-        id_col = "ID" if "ID" in te_df.columns else "id"
-        sub = pd.DataFrame({"ID": te_df[id_col].values, "label": preds.astype(int)})
-
-        out_dir = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
-        out_path = os.path.join(out_dir, "submission.csv")
-        sub.to_csv(out_path, index=False)
-
-        logger.info("Submission saved: %s", out_path)
-        logger.info("Machine ratio: %.2f%% (%d / %d)", sub["label"].mean() * 100, sub["label"].sum(), len(sub))
-
-        # Evaluate on sample if available
-        if sa_df is not None and meta_sa is not None:
-            sa_norm = self.tuner.rank_normalize(meta_sa)
-            if sa_langs is not None and not np.all(sa_langs == "Unknown"):
-                sa_preds = self.tuner.language_aware_predict(
-                    sa_norm, sa_langs, tune_cfg["global"], tune_cfg["l_map"], tune_cfg["shrink"],
-                )
-            else:
-                sa_preds = self.tuner.apply_ratio(sa_norm, tune_cfg["global"])
-            sa_preds[sa_artifacts] = 1
-            logger.info("Sample F1: %.4f", f1_score(sa_df["label"].values, sa_preds, average="macro"))
-
-        total_min = (time.time() - t_start) / 60
-        logger.info("Total elapsed: %.1f minutes (%.1f hours)", total_min, total_min / 60)
-        return sub
+        return self._tune_save_submission(
+            te_df, sa_df, te_langs, sa_langs, te_artifacts, sa_artifacts,
+            meta_te, meta_sa, t_start, metrics,
+        )

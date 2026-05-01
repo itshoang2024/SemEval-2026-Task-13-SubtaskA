@@ -12,17 +12,20 @@ Kaggle notebook v7 should decide whether to reuse ppl_*.npy or sty_*.npy.
 
 ## Current resume behavior
 
-`src/orchestrator.py` currently loads existing checkpoints only for these groups:
+`src/orchestrator.py` currently loads existing checkpoints automatically for these groups:
 
 - `ppl_train.npy`, `ppl_test.npy`, `ppl_sample.npy`
 - `sty_train.npy`, `sty_test.npy`, `sty_sample.npy`
 
-It saves but does not currently reload these later files:
+It can also load these final score checkpoints when `CAMSP_REUSE_META_SCORES=1` or `CAMSP_TUNING_ONLY=1`:
 
-- `oof.npy`, `te_sum.npy`, `sa_sum.npy`
 - `meta_te.npy`, `meta_sa.npy`
 
-Copying saved-but-not-reloaded files into a new Kaggle version does not skip those phases unless the orchestrator is changed to load them.
+It saves but does not currently reload these fold-accumulator files:
+
+- `oof.npy`, `te_sum.npy`, `sa_sum.npy`
+
+Copying `oof.npy`, `te_sum.npy`, or `sa_sum.npy` into a new Kaggle version does not skip those phases unless the orchestrator is changed to load them.
 
 ## Safety rule
 
@@ -78,7 +81,8 @@ git diff "$BASE..HEAD" -- src/config.py src/features.py src/orchestrator.py src/
 | `CodeStyleExtractor` changed | Yes | No | PPL is independent; style feature values/order changed. |
 | Style/PPL merge logic in `src/orchestrator.py` changed | Maybe | No | PPL may still be valid, but `sty_*` column composition changed. |
 | Base model, fold, vectorizer, SGD, or style HGB config changed | Yes | Yes | Current code reloads `ppl_*` and `sty_*`; later model stages will rerun. |
-| Meta-learner or `OODRatioTuner` changed | Yes | Yes | Feature checkpoints are upstream and still valid. |
+| Meta-learner changed | Yes | Yes | Feature checkpoints are upstream, but `meta_*` must be recomputed. |
+| `OODRatioTuner` changed only | Yes | Yes | Reuse `meta_te.npy` and `meta_sa.npy` with `CAMSP_TUNING_ONLY=1` if meta scores are compatible. |
 | Artifact detection changed only | Yes | Yes | It affects final forced labels, not PPL/style arrays. |
 
 When a row says "Maybe", inspect the exact diff. If the diff changes how a loaded checkpoint is interpreted, recompute it.
@@ -101,6 +105,15 @@ split data + row order
 ```
 
 Important: `sty_*.npy` already contains style features plus appended PPL columns. Reusing `sty_*` with newly computed or different `ppl_*` can create inconsistent training signals.
+
+For tuning-only experiments:
+
+```text
+compatible meta_te.npy + compatible meta_sa.npy
+    + src/tuning.py changes only
+    + unchanged test/sample row order
+        -> rerun with CAMSP_TUNING_ONLY=1
+```
 
 ## Validate copied checkpoints
 
@@ -178,7 +191,27 @@ for name in approved:
         print("missing", name)
 ```
 
-Do not copy `oof.npy`, `te_sum.npy`, `sa_sum.npy`, `meta_te.npy`, or `meta_sa.npy` for resume purposes unless the orchestrator has been changed to validate and load them.
+Copy meta scores only for tuning-only experiments:
+
+```python
+import glob
+import os
+import shutil
+
+src_ckpt = glob.glob("/kaggle/input/**/_ckpt", recursive=True)[0]
+dst_ckpt = "/kaggle/working/_ckpt"
+os.makedirs(dst_ckpt, exist_ok=True)
+
+for name in ["meta_te.npy", "meta_sa.npy"]:
+    src = os.path.join(src_ckpt, name)
+    if os.path.exists(src):
+        shutil.copy2(src, os.path.join(dst_ckpt, name))
+        print("copied", name)
+    else:
+        print("missing", name)
+```
+
+Do not copy `oof.npy`, `te_sum.npy`, or `sa_sum.npy` for resume purposes unless the orchestrator has been changed to validate and load them.
 
 ## Agent checklist
 

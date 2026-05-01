@@ -6,7 +6,7 @@ constrained grid search with language-aware shrinkage interpolation.
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -35,6 +35,15 @@ class OODRatioTuner:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.cfg = config
+
+    @staticmethod
+    def has_reliable_languages(languages, min_count: int = 8) -> bool:
+        """Returns True when language labels are useful for per-language tuning."""
+        if languages is None:
+            return False
+        lang_series = pd.Series(languages).fillna("Unknown").astype(str)
+        counts = lang_series[lang_series != "Unknown"].value_counts()
+        return int((counts >= min_count).sum()) >= 2
 
     @staticmethod
     def rank_normalize(scores: np.ndarray) -> np.ndarray:
@@ -102,12 +111,72 @@ class OODRatioTuner:
             preds[idx] = self.apply_ratio(scores[idx], adj)
         return preds
 
+    def predict_from_config(
+        self,
+        scores: np.ndarray,
+        tune_cfg: dict,
+        languages: Optional[np.ndarray] = None,
+        artifacts: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Applies a tuned ratio configuration to raw scores."""
+        norm = self.rank_normalize(scores)
+        strategy = tune_cfg.get("strategy", "global")
+        use_language = (
+            strategy.startswith("language")
+            and self.has_reliable_languages(languages)
+        )
+        if use_language:
+            preds = self.language_aware_predict(
+                norm,
+                languages,
+                tune_cfg["global"],
+                tune_cfg.get("l_map", {}),
+                tune_cfg.get("shrink", 0.0),
+            )
+        else:
+            preds = self.apply_ratio(norm, tune_cfg.get("global", self.cfg.fallback_global_ratio))
+
+        if tune_cfg.get("force_artifacts", False) and artifacts is not None:
+            preds[np.asarray(artifacts, dtype=bool)] = 1
+        return preds
+
+    @staticmethod
+    def _maybe_force_artifacts(preds: np.ndarray, artifacts: Optional[np.ndarray]) -> np.ndarray:
+        forced = preds.copy()
+        if artifacts is not None:
+            forced[np.asarray(artifacts, dtype=bool)] = 1
+        return forced
+
+    def _consider(
+        self,
+        best: dict,
+        labels: np.ndarray,
+        preds: np.ndarray,
+        strategy: str,
+        global_ratio: float,
+        lang_map: Optional[Dict[str, float]] = None,
+        shrink: float = 0.0,
+        force_artifacts: bool = False,
+    ) -> dict:
+        f1 = f1_score(labels, preds, average="macro")
+        if f1 <= best["score"]:
+            return best
+        return {
+            "score": float(f1),
+            "strategy": strategy,
+            "global": float(global_ratio),
+            "l_map": (lang_map or {}).copy(),
+            "shrink": float(shrink),
+            "force_artifacts": bool(force_artifacts),
+        }
+
     def tune(
         self,
         sample_labels: np.ndarray,
         sample_scores: np.ndarray,
         lang_series: pd.Series,
         forced_artifacts: np.ndarray,
+        allow_language: bool = True,
     ) -> dict:
         """Runs constrained grid search to find optimal ratio configuration.
 
@@ -116,18 +185,51 @@ class OODRatioTuner:
             sample_scores: Raw model scores from the meta-learner.
             lang_series: Language labels for each sample.
             forced_artifacts: Boolean mask of detected hard artifacts.
+            allow_language: If False, only global ratio strategies are tested.
 
         Returns:
-            Dict with keys: score, global, l_map, shrink.
+            Dict with score, strategy, global, l_map, shrink, force_artifacts.
         """
-        logger.info("Starting OOD Adaptive Shrinkage Tuning")
+        logger.info("Starting OOD ratio tuning")
         scores = self.rank_normalize(sample_scores)
+        artifacts = (
+            np.asarray(forced_artifacts, dtype=bool)
+            if forced_artifacts is not None else None
+        )
         best = {
             "score": -1.0,
+            "strategy": "global",
             "global": self.cfg.fallback_global_ratio,
             "l_map": {},
             "shrink": 0.0,
+            "force_artifacts": False,
         }
+
+        # Always test global ratio strategies. This is also the only valid
+        # mode when the full test set has no reliable language labels.
+        for gr in self.cfg.global_ratio_grid:
+            base_preds = self.apply_ratio(scores, float(gr))
+            best = self._consider(
+                best, sample_labels, base_preds, "global", float(gr)
+            )
+            if artifacts is not None and artifacts.any():
+                best = self._consider(
+                    best,
+                    sample_labels,
+                    self._maybe_force_artifacts(base_preds, artifacts),
+                    "global_artifact",
+                    float(gr),
+                    force_artifacts=True,
+                )
+
+        use_language = allow_language and self.has_reliable_languages(lang_series)
+        if not use_language:
+            logger.info("Language-aware tuning skipped; using best global strategy")
+            logger.info(
+                "Tuned -> F1: %.4f | Strategy: %s | Ratio: %.2f | Force artifacts: %s",
+                best["score"], best["strategy"], best["global"], best["force_artifacts"],
+            )
+            return best
 
         for gr in self.cfg.global_ratio_grid:
             lang_map = {}
@@ -151,19 +253,31 @@ class OODRatioTuner:
                 preds = self.language_aware_predict(
                     scores, lang_series.values, float(gr), lang_map, shrink
                 )
-                preds[forced_artifacts] = 1
-                f1 = f1_score(sample_labels, preds, average="macro")
-                if f1 > best["score"]:
-                    best = {
-                        "score": float(f1),
-                        "global": float(gr),
-                        "l_map": lang_map.copy(),
-                        "shrink": float(shrink),
-                    }
+                best = self._consider(
+                    best,
+                    sample_labels,
+                    preds,
+                    "language",
+                    float(gr),
+                    lang_map,
+                    float(shrink),
+                )
+                if artifacts is not None and artifacts.any():
+                    best = self._consider(
+                        best,
+                        sample_labels,
+                        self._maybe_force_artifacts(preds, artifacts),
+                        "language_artifact",
+                        float(gr),
+                        lang_map,
+                        float(shrink),
+                        force_artifacts=True,
+                    )
 
         logger.info(
-            "Tuned -> F1: %.4f | Ratio: %.2f | Shrink: %.2f",
-            best["score"], best["global"], best["shrink"],
+            "Tuned -> F1: %.4f | Strategy: %s | Ratio: %.2f | Shrink: %.2f | Force artifacts: %s",
+            best["score"], best["strategy"], best["global"], best["shrink"],
+            best["force_artifacts"],
         )
         return best
 
@@ -172,8 +286,8 @@ class OODRatioTuner:
         sample_labels: np.ndarray,
         sample_scores: np.ndarray,
         forced_artifacts: np.ndarray,
-    ) -> float:
-        """Finds the best single ratio treating ALL samples as one group.
+    ) -> dict:
+        """Finds the best global ratio treating ALL samples as one group.
 
         Used when the test set has no 'language' column, making per-language
         ratios useless. This re-tunes the global ratio by evaluating on the
@@ -185,23 +299,19 @@ class OODRatioTuner:
             forced_artifacts: Boolean mask of detected hard artifacts.
 
         Returns:
-            Optimal global ratio (float).
+            Global-only tune config dict.
         """
         logger.info("Re-tuning global ratio for language-free test set")
-        norm = self.rank_normalize(sample_scores)
-        best_ratio = self.cfg.fallback_global_ratio
-        best_f1 = -1.0
-
-        for r in self.cfg.global_ratio_grid:
-            preds = self.apply_ratio(norm, r).copy()
-            preds[forced_artifacts] = 1
-            f1 = f1_score(sample_labels, preds, average="macro")
-            if f1 > best_f1:
-                best_f1 = f1
-                best_ratio = float(r)
+        cfg = self.tune(
+            sample_labels,
+            sample_scores,
+            pd.Series(np.full(len(sample_labels), "Unknown", dtype=object)),
+            forced_artifacts,
+            allow_language=False,
+        )
 
         logger.info(
-            "Global-only tuning -> best ratio: %.2f (F1=%.4f)",
-            best_ratio, best_f1,
+            "Global-only tuning -> strategy: %s | ratio: %.2f | F1=%.4f",
+            cfg["strategy"], cfg["global"], cfg["score"],
         )
-        return best_ratio
+        return cfg

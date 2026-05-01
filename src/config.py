@@ -12,6 +12,14 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parses a boolean environment flag."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass
 class PipelineConfig:
     """Immutable configuration container for the CAMSP pipeline.
@@ -41,6 +49,11 @@ class PipelineConfig:
         ppl_batch_size: Batch size for LLM inference.
         ppl_train_subsample: Number of training samples for LLM perplexity.
         ppl_time_budget_sec: Total seconds allocated for LLM computation.
+        reuse_meta_scores: Load meta_te/meta_sa checkpoints and skip directly
+            to ratio tuning when available.
+        tuning_only: Require meta_te/meta_sa checkpoints and run only ratio
+            tuning plus submission generation.
+        metrics_path: Optional JSON metrics output path.
         n_folds: Number of stratified folds for stacking.
         meta_lr: Learning rate for the HGB meta-learner.
         meta_max_iter: Maximum boosting iterations for meta-learner.
@@ -82,6 +95,15 @@ class PipelineConfig:
     ppl_batch_size: int = 128
     ppl_train_subsample: int = 50_000
     ppl_time_budget_sec: int = 25_200  # 7 hours
+
+    # --- Experiment Controls ---
+    reuse_meta_scores: bool = field(
+        default_factory=lambda: _env_flag("CAMSP_REUSE_META_SCORES")
+    )
+    tuning_only: bool = field(default_factory=lambda: _env_flag("CAMSP_TUNING_ONLY"))
+    metrics_path: Optional[str] = field(
+        default_factory=lambda: os.getenv("CAMSP_METRICS_PATH") or None
+    )
 
     # --- Stacking Meta-Learner ---
     n_folds: int = 5

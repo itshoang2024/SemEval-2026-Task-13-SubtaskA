@@ -168,6 +168,18 @@ Supported load modes are `4bit`, `fp16`, `bf16`, and `fp32`. For full weights on
 - Batch size defaults to `128`; the LLM engine halves batch size on CUDA OOM down to a minimum of `8`.
 - All sparse matrices use CSR-compatible scikit-learn vectorizers.
 - Expensive intermediate arrays are checkpointed to `/kaggle/working/_ckpt/` on Kaggle.
+- Run metrics are written to `/kaggle/working/run_metrics.json` by default.
+
+### Fast Tuning Experiments
+
+After one full run has produced `meta_te.npy` and `meta_sa.npy`, ratio-tuning-only experiments can skip PPL, style extraction, stacking, and meta-learning:
+
+```python
+%env CAMSP_TUNING_ONLY=1
+!python scripts/run_inference.py
+```
+
+Use `CAMSP_REUSE_META_SCORES=1` instead when you want to reuse compatible meta scores if they exist, but fall back to a full run if they are missing.
 
 ---
 

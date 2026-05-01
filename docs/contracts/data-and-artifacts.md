@@ -59,6 +59,13 @@ Current checkpoint names:
 - `te_sum.npy`: accumulated test base-model predictions across folds.
 - `sa_sum.npy`: accumulated sample base-model predictions across folds.
 - `meta_te.npy`, `meta_sa.npy`: meta-learner scores.
+- `run_metrics.json`: run metadata, checkpoint usage, PPL coverage, tuning config, sample F1 when available, machine ratio, and runtime. Written to `/kaggle/working/run_metrics.json` on Kaggle unless `CAMSP_METRICS_PATH` overrides it.
+
+Checkpoint resume behavior:
+
+- `ppl_*.npy` and `sty_*.npy` are loaded automatically when present.
+- `meta_te.npy` and `meta_sa.npy` are loaded only when `CAMSP_REUSE_META_SCORES=1` or `CAMSP_TUNING_ONLY=1`.
+- `oof.npy`, `te_sum.npy`, and `sa_sum.npy` are saved for recovery/debugging but are not currently loaded to skip stacking.
 
 Checkpoint compatibility depends on:
 
@@ -102,6 +109,7 @@ Before a full run:
 After a run:
 
 - Confirm `submission.csv` exists.
+- Confirm `run_metrics.json` exists.
 - Confirm output columns are exactly `ID,label`.
 - Confirm output row count equals `len(test.parquet)`.
 - Confirm `label` values are only `0` and `1`.

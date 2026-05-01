@@ -45,15 +45,32 @@ Supported `CAMSP_PPL_LOAD_MODE` values are `4bit`, `fp16`, `bf16`, and `fp32`. U
 
 - `/kaggle/working/submission.csv`
 - `/kaggle/working/_ckpt/*.npy`
+- `/kaggle/working/run_metrics.json`
 - Logs for all major phases: data loading, LLM perplexity, style extraction, 5-fold stacking, meta-learner, ratio tuning, and submission writing.
 
-The final printed summary should include prediction row count and machine ratio.
+The logs and metrics JSON should include PPL load mode, checkpoint usage, PPL coverage, sample F1 when available, machine ratio, and total runtime.
 
 ## Resume behavior
 
 The orchestrator loads existing checkpoints from `/kaggle/working/_ckpt/` when present. This can save time after an interrupted run.
 
 When reusing checkpoints from a previous Kaggle notebook version or from a different repo commit, follow `docs/runbooks/checkpoint-reuse.md`. Do not copy the whole `_ckpt` folder by default; copy only the checkpoint groups that are compatible with the current code and data.
+
+For tuning-only experiments after a full run has produced `meta_te.npy` and `meta_sa.npy`, use:
+
+```python
+%env CAMSP_TUNING_ONLY=1
+!python scripts/run_inference.py
+```
+
+This requires valid `meta_te.npy` and, when `test_sample.parquet` exists, valid `meta_sa.npy` in `/kaggle/working/_ckpt/`. It skips PPL, style extraction, stacking, and meta-learning, then reruns ratio tuning, writes `submission.csv`, and exports `run_metrics.json`.
+
+If you want to reuse meta scores when present but fall back to a full run when they are missing:
+
+```python
+%env CAMSP_REUSE_META_SCORES=1
+!python scripts/run_inference.py
+```
 
 Delete `/kaggle/working/_ckpt/` before rerunning if any of these changed:
 
@@ -81,6 +98,23 @@ assert set(sub["label"].unique()).issubset({0, 1})
 ```
 
 Also compare `len(sub)` with the competition `test.parquet` row count if the test file is easy to locate in the notebook.
+
+Inspect run metrics:
+
+```python
+import json
+
+with open("/kaggle/working/run_metrics.json") as f:
+    metrics = json.load(f)
+
+print({
+    "ppl_mode": metrics.get("ppl_load_mode"),
+    "checkpoint_usage": metrics.get("checkpoint_usage"),
+    "sample_f1": metrics.get("sample_f1"),
+    "machine_ratio": metrics.get("machine_ratio"),
+    "total_minutes": metrics.get("total_minutes"),
+})
+```
 
 ## Common issues
 
