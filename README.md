@@ -1,7 +1,7 @@
 # CAMSP v10.2 - Compression-Aware Meta-Stacking Pipeline
 
 > **SemEval 2026 Task 13 Subtask A**: AI-Generated Code Detection
-> *Detecting machine-generated code across 8+ programming languages with out-of-distribution resilience*
+> *Detecting machine-generated code across 8+ programming languages with Out-of-Distribution resilience*
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.3%2B-orange)
@@ -47,7 +47,7 @@ style_hgb    ─┘
 
 ### 2. LLM Perplexity Engine (Sequential Completion Strategy)
 
-Uses **Qwen2.5-Coder-0.5B** quantized to **NF4 4-bit** with BitsAndBytes when CUDA, Transformers, and a loadable model are available.
+Uses **Qwen2.5-Coder-0.5B** for token-level NLL features when CUDA, Transformers, and a loadable model are available. By default it loads the model with **NF4 4-bit** BitsAndBytes quantization; set `CAMSP_PPL_LOAD_MODE=fp16` to benchmark full FP16 weights.
 
 Current v10.1/v10.2 behavior:
 
@@ -60,6 +60,7 @@ Current LLM defaults from `PipelineConfig`:
 
 | Setting | Value |
 |---------|-------|
+| Load mode | `4bit` by default; override with `CAMSP_PPL_LOAD_MODE` |
 | Max tokens | `128` |
 | Batch size | `128` |
 | Train subsample | `50,000` |
@@ -138,6 +139,20 @@ SemEval-2026-Task-13-SubtaskA/
 !python scripts/run_inference.py
 ```
 
+To benchmark full FP16 weights instead of 4-bit quantization, omit the `bitsandbytes` install and set the load mode before running:
+
+```python
+%cd /kaggle/working
+!rm -rf SemEval-2026-Task-13-SubtaskA
+!git clone https://github.com/gugOfBoat/SemEval-2026-Task-13-SubtaskA.git
+
+%cd SemEval-2026-Task-13-SubtaskA
+%env CAMSP_PPL_LOAD_MODE=fp16
+!python scripts/run_inference.py
+```
+
+Supported load modes are `4bit`, `fp16`, `bf16`, and `fp32`. For full weights on Kaggle, prefer `fp16`; `fp32` is usually slower and uses more VRAM.
+
 ### Runtime Notes
 
 | Phase | Behavior |
@@ -149,7 +164,7 @@ SemEval-2026-Task-13-SubtaskA/
 
 ### VRAM & Speed Notes
 
-- Qwen-0.5B at NF4 4-bit is intended to fit comfortably on Kaggle GPU runtimes.
+- Qwen-0.5B at NF4 4-bit is intended to fit comfortably on Kaggle GPU runtimes; FP16 full weights use more VRAM but may benchmark faster for this small model.
 - Batch size defaults to `128`; the LLM engine halves batch size on CUDA OOM down to a minimum of `8`.
 - All sparse matrices use CSR-compatible scikit-learn vectorizers.
 - Expensive intermediate arrays are checkpointed to `/kaggle/working/_ckpt/` on Kaggle.

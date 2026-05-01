@@ -162,7 +162,7 @@ class CodeStyleExtractor:
 
 
 class LLMPerplexityEngine:
-    """Computes token-level NLL features using a quantized causal LM.
+    """Computes token-level NLL features using a causal LM.
 
     **Sequential Completion Strategy (v10.1)**:
     Instead of fixed percentage splits, this engine runs each dataset
@@ -207,10 +207,11 @@ class LLMPerplexityEngine:
         """
         logger.info(
             "LLM Perplexity Engine v10.1 — Sequential Completion | "
-            "budget=%ds, tokens=%d, batch=%d",
+            "budget=%ds, tokens=%d, batch=%d, load_mode=%s",
             self.cfg.ppl_time_budget_sec,
             self.cfg.ppl_max_tokens,
             self.cfg.ppl_batch_size,
+            self.cfg.ppl_load_mode,
         )
 
         model, tokenizer = self._load_model()
@@ -283,10 +284,11 @@ class LLMPerplexityEngine:
         return ppl_train, ppl_test, ppl_sample
 
     def _load_model(self):
-        """Attempts to load a quantized causal LM from Kaggle model inputs.
+        """Attempts to load a causal LM from Kaggle model inputs.
 
-        Tries each candidate path in order. Prefers NF4 4-bit quantization
-        for optimal VRAM efficiency on T4 GPUs.
+        Tries each candidate path in order. The default loading mode is NF4
+        4-bit quantization, but fp16/bf16/fp32 can be selected with
+        ``PipelineConfig.ppl_load_mode`` or ``CAMSP_PPL_LOAD_MODE``.
 
         Returns:
             Tuple of (model, tokenizer) or (None, None) on failure.
@@ -296,34 +298,56 @@ class LLMPerplexityEngine:
             if not torch.cuda.is_available():
                 logger.warning("No CUDA available")
                 return None, None
-            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+            from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError:
             logger.warning("transformers not installed")
             return None, None
+
+        load_mode = (self.cfg.ppl_load_mode or "4bit").lower()
+        if load_mode not in {"4bit", "fp16", "bf16", "fp32"}:
+            logger.warning("Unsupported PPL load mode '%s' — falling back to 4bit", load_mode)
+            load_mode = "4bit"
 
         for path in self.cfg.ppl_candidates:
             if path.startswith("/") and not os.path.isdir(path):
                 continue
             try:
-                logger.info("Trying LLM: %s", path)
+                logger.info("Trying LLM: %s (load_mode=%s)", path, load_mode)
                 tokenizer = AutoTokenizer.from_pretrained(
                     path, trust_remote_code=True, padding_side="right"
                 )
                 if tokenizer.pad_token is None:
                     tokenizer.pad_token = tokenizer.eos_token
 
-                model = AutoModelForCausalLM.from_pretrained(
-                    path,
-                    quantization_config=BitsAndBytesConfig(
+                model_kwargs = {
+                    "device_map": "auto",
+                    "trust_remote_code": True,
+                }
+                if load_mode == "4bit":
+                    try:
+                        from transformers import BitsAndBytesConfig
+                    except ImportError as exc:
+                        raise ImportError(
+                            "bitsandbytes/4-bit loading requires transformers BitsAndBytesConfig"
+                        ) from exc
+                    model_kwargs["quantization_config"] = BitsAndBytesConfig(
                         load_in_4bit=True,
                         bnb_4bit_compute_dtype=torch.float16,
                         bnb_4bit_quant_type="nf4",
-                    ),
-                    device_map="auto",
-                    trust_remote_code=True,
-                )
+                    )
+                    loaded_desc = "BnB NF4 4-bit"
+                else:
+                    dtype_map = {
+                        "fp16": torch.float16,
+                        "bf16": torch.bfloat16,
+                        "fp32": torch.float32,
+                    }
+                    model_kwargs["torch_dtype"] = dtype_map[load_mode]
+                    loaded_desc = load_mode
+
+                model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
                 model.eval()
-                logger.info("Loaded %s (BnB NF4 4-bit)", path)
+                logger.info("Loaded %s (%s)", path, loaded_desc)
                 return model, tokenizer
             except Exception as exc:
                 logger.warning("Failed %s: %s", path, exc)

@@ -5,6 +5,7 @@ Centralizes all hyperparameters, model paths, and tuning grids
 using Python dataclasses for type safety and documentation.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -34,6 +35,8 @@ class PipelineConfig:
         text_max_iter: Maximum SGD training epochs.
         style_subsample: Row limit for HGB style model training.
         ppl_candidates: Ordered list of LLM checkpoint paths to try.
+        ppl_load_mode: LLM weight loading mode. Supported values: 4bit, fp16,
+            bf16, fp32. Defaults to CAMSP_PPL_LOAD_MODE or 4bit.
         ppl_max_tokens: Maximum token length per LLM forward pass.
         ppl_batch_size: Batch size for LLM inference.
         ppl_train_subsample: Number of training samples for LLM perplexity.
@@ -72,6 +75,9 @@ class PipelineConfig:
         "/kaggle/input/qwen2.5-coder/transformers/1.5b-instruct/1",
         "Qwen/Qwen2.5-Coder-0.5B-Instruct",
     ])
+    ppl_load_mode: str = field(
+        default_factory=lambda: os.getenv("CAMSP_PPL_LOAD_MODE", "4bit").lower()
+    )
     ppl_max_tokens: int = 128
     ppl_batch_size: int = 128
     ppl_train_subsample: int = 50_000

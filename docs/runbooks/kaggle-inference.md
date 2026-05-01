@@ -12,6 +12,8 @@ Use this runbook for the primary competition workflow.
 
 ## Run
 
+Default 4-bit PPL mode:
+
 ```python
 !pip install bitsandbytes -q
 
@@ -23,7 +25,21 @@ Use this runbook for the primary competition workflow.
 !python scripts/run_inference.py
 ```
 
-`scripts/run_inference.py` also attempts to install `bitsandbytes` if importing it fails.
+`scripts/run_inference.py` also attempts to install `bitsandbytes` if importing it fails and `CAMSP_PPL_LOAD_MODE` is unset or set to `4bit`.
+
+Full FP16 PPL mode:
+
+```python
+%cd /kaggle/working
+!rm -rf SemEval-2026-Task-13-SubtaskA
+!git clone https://github.com/gugOfBoat/SemEval-2026-Task-13-SubtaskA.git
+
+%cd SemEval-2026-Task-13-SubtaskA
+%env CAMSP_PPL_LOAD_MODE=fp16
+!python scripts/run_inference.py
+```
+
+Supported `CAMSP_PPL_LOAD_MODE` values are `4bit`, `fp16`, `bf16`, and `fp32`. Use `fp16` for the full-weight Kaggle benchmark unless you have a specific reason to test `fp32`.
 
 ## Expected outputs
 

@@ -11,17 +11,19 @@ Usage (single Kaggle notebook cell):
 """
 
 import logging
+import os
 import subprocess
 import sys
 
-# Ensure bitsandbytes is available for NF4 quantization
-try:
-    import bitsandbytes
-except ImportError:
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "bitsandbytes"],
-        check=False, capture_output=True,
-    )
+# Ensure bitsandbytes is available only when NF4 quantization is requested.
+if os.getenv("CAMSP_PPL_LOAD_MODE", "4bit").lower() == "4bit":
+    try:
+        import bitsandbytes
+    except ImportError:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "bitsandbytes"],
+            check=False, capture_output=True,
+        )
 
 # Configure structured logging
 logging.basicConfig(

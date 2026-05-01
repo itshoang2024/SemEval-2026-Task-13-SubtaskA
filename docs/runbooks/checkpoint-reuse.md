@@ -70,6 +70,7 @@ git diff "$BASE..HEAD" -- src/config.py src/features.py src/orchestrator.py src/
 | `src/data_utils.py` loading behavior changed in a way that can reorder/filter rows | No | No | Row alignment may be invalid. |
 | `PipelineConfig.max_chars` changed | No | No | It affects both PPL truncation and style compression inputs. |
 | `PipelineConfig.ppl_candidates` changed to a different underlying model/tokenizer | No | No | PPL values come from a different LLM distribution. |
+| `PipelineConfig.ppl_load_mode` or `CAMSP_PPL_LOAD_MODE` changed | No | No | PPL values may shift between 4-bit and full-weight inference. |
 | `ppl_max_tokens`, `ppl_train_subsample`, `seed`, or PPL completion/subsample policy changed | No | No | PPL shape may match, but values/coverage/row positions can differ. |
 | `ppl_batch_size` or `ppl_time_budget_sec` changed only for runtime speed | Usually yes | Usually yes | These should not change completed feature values, but verify old coverage is acceptable. |
 | `LLMPerplexityEngine.FEATURE_NAMES` changed | No | No | Column count/order changed; `sty_*` also embeds PPL columns. |
