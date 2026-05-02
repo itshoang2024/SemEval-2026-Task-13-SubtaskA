@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
 from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
 from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import f1_score
@@ -83,6 +83,21 @@ def _load_score_ckpt(name: str, expected_rows: int) -> np.ndarray:
         logger.warning(
             "Ignoring checkpoint %s: expected shape (%d,), got %s",
             name, expected_rows, arr.shape,
+        )
+        return None
+    return arr.astype(np.float32, copy=False)
+
+
+def _load_matrix_ckpt(name: str, expected_rows: int, expected_cols: int) -> np.ndarray:
+    """Loads a 2D checkpoint and validates shape."""
+    arr = _load_ckpt(name)
+    if arr is None:
+        return None
+    expected = (expected_rows, expected_cols)
+    if arr.ndim != 2 or arr.shape != expected:
+        logger.warning(
+            "Ignoring checkpoint %s: expected shape %s, got %s",
+            name, expected, arr.shape,
         )
         return None
     return arr.astype(np.float32, copy=False)
@@ -154,9 +169,117 @@ class CAMSPipeline:
         """Truncates code samples to max_chars for vectorization."""
         return [str(x)[: self.cfg.max_chars] if x else "" for x in codes]
 
+    def _base_model_names(self) -> list:
+        """Returns enabled base model names in score-column order."""
+        names = ["char_full", "char_family", "word_hash", "style_hgb"]
+        if self.cfg.enable_style_et:
+            names.append("style_et")
+        return names
+
+    def _style_ckpt_name(self, split: str) -> str:
+        """Returns style checkpoint name for the configured style version."""
+        if self.style_eng.style_version == "v1":
+            return f"sty_{split}"
+        return f"sty_{split}_{self.style_eng.style_version}"
+
+    def _meta_base_signature_ok(self, base_names: list) -> bool:
+        """Checks whether reusable meta scores match the enabled base models."""
+        saved = _load_ckpt("meta_base_models")
+        if saved is None:
+            default_base = ["char_full", "char_family", "word_hash", "style_hgb"]
+            if list(base_names) != default_base:
+                logger.warning(
+                    "Ignoring meta checkpoints: missing meta_base_models.npy for non-default base models"
+                )
+                return False
+            return True
+
+        saved_names = [str(name) for name in saved.tolist()]
+        if saved_names != list(base_names):
+            logger.warning(
+                "Ignoring meta checkpoints: expected base models %s, got %s",
+                base_names, saved_names,
+            )
+            return False
+        return True
+
     def _check_deadline(self, t_start: float, phase: str) -> None:
         """Deadline guard disabled to allow full 12h Kaggle execution."""
         pass
+
+    def _blend_component(self, base_scores: np.ndarray, component: str, base_names: list) -> np.ndarray:
+        """Returns a rank-normalized base-score component for blending."""
+        if component == "base_mean":
+            cols = [
+                self.tuner.rank_normalize(base_scores[:, j])
+                for j in range(base_scores.shape[1])
+            ]
+            return np.column_stack(cols).mean(axis=1).astype(np.float32)
+        if component not in base_names:
+            raise ValueError(f"Unknown blend component: {component}")
+        idx = base_names.index(component)
+        return self.tuner.rank_normalize(base_scores[:, idx])
+
+    def _apply_score_blend(
+        self,
+        meta_scores: np.ndarray,
+        base_scores: np.ndarray,
+        blend_cfg: dict,
+        base_names: list,
+    ) -> np.ndarray:
+        """Applies a tuned convex blend to raw meta and base scores."""
+        meta_norm = self.tuner.rank_normalize(meta_scores)
+        component_scores = self._blend_component(
+            base_scores, blend_cfg["component"], base_names
+        )
+        meta_weight = float(blend_cfg["meta_weight"])
+        return (
+            meta_weight * meta_norm + (1.0 - meta_weight) * component_scores
+        ).astype(np.float32)
+
+    def _tune_score_blend(
+        self,
+        labels: np.ndarray,
+        meta_sa: np.ndarray,
+        base_sa: np.ndarray,
+        lang_series: pd.Series,
+        artifacts: np.ndarray,
+        allow_language: bool,
+        base_names: list,
+    ) -> tuple:
+        """Tunes a small convex blend between meta scores and base scores."""
+        best_tune = None
+        best_blend = None
+        candidates = ["base_mean"] + list(base_names)
+        meta_norm = self.tuner.rank_normalize(meta_sa)
+
+        for component in candidates:
+            component_scores = self._blend_component(base_sa, component, base_names)
+            for meta_weight in self.cfg.score_blend_grid:
+                blended_sa = (
+                    float(meta_weight) * meta_norm
+                    + (1.0 - float(meta_weight)) * component_scores
+                ).astype(np.float32)
+                tune_cfg = self.tuner.tune(
+                    labels,
+                    blended_sa,
+                    lang_series,
+                    artifacts,
+                    allow_language=allow_language,
+                )
+                if best_tune is None or tune_cfg["score"] > best_tune["score"]:
+                    best_tune = tune_cfg
+                    best_blend = {
+                        "enabled": True,
+                        "component": component,
+                        "meta_weight": float(meta_weight),
+                    }
+
+        logger.info(
+            "Score blend tuned -> F1: %.4f | component=%s | meta_weight=%.2f",
+            best_tune["score"], best_blend["component"], best_blend["meta_weight"],
+        )
+        return best_tune, best_blend
 
     def _tune_save_submission(
         self,
@@ -170,6 +293,9 @@ class CAMSPipeline:
         meta_sa: np.ndarray,
         t_start: float,
         metrics: dict,
+        base_te: np.ndarray = None,
+        base_sa: np.ndarray = None,
+        base_names: list = None,
     ) -> pd.DataFrame:
         """Tunes ratios, writes submission.csv, exports metrics, and returns it."""
         # -- 6. Adaptive Ratio Tuning --
@@ -183,13 +309,71 @@ class CAMSPipeline:
 
         if sa_df is not None and meta_sa is not None:
             sa_lang_series = pd.Series(sa_langs).fillna("Unknown").astype(str)
-            tune_cfg = self.tuner.tune(
+            baseline_tune = self.tuner.tune(
                 sa_df["label"].values,
                 meta_sa,
                 sa_lang_series,
                 sa_artifacts,
                 allow_language=allow_language,
             )
+            if self.cfg.enable_score_blend and base_te is not None and base_sa is not None:
+                candidate_tune, blend_cfg = self._tune_score_blend(
+                    sa_df["label"].values,
+                    meta_sa,
+                    base_sa,
+                    sa_lang_series,
+                    sa_artifacts,
+                    allow_language,
+                    base_names or self._base_model_names(),
+                )
+                blended_te = self._apply_score_blend(
+                    meta_te, base_te, blend_cfg, base_names or self._base_model_names()
+                )
+                blended_sa = self._apply_score_blend(
+                    meta_sa, base_sa, blend_cfg, base_names or self._base_model_names()
+                )
+                baseline_preds = self.tuner.predict_from_config(
+                    meta_te, baseline_tune, te_langs, te_artifacts
+                )
+                candidate_preds = self.tuner.predict_from_config(
+                    blended_te, candidate_tune, te_langs, te_artifacts
+                )
+                baseline_ratio = float(baseline_preds.mean())
+                candidate_ratio = float(candidate_preds.mean())
+                score_gain = float(candidate_tune["score"] - baseline_tune["score"])
+                ratio_shift = abs(candidate_ratio - baseline_ratio)
+
+                blend_cfg.update({
+                    "baseline_score": float(baseline_tune["score"]),
+                    "score_gain": score_gain,
+                    "baseline_machine_ratio": baseline_ratio,
+                    "candidate_machine_ratio": candidate_ratio,
+                    "ratio_shift": ratio_shift,
+                    "ratio_shift_limit": 0.03,
+                })
+                if score_gain > 0.0 and ratio_shift <= 0.03:
+                    meta_te = blended_te
+                    meta_sa = blended_sa
+                    tune_cfg = candidate_tune
+                    tune_cfg["blend"] = blend_cfg
+                else:
+                    reason = "machine_ratio_shift" if ratio_shift > 0.03 else "no_sample_f1_gain"
+                    logger.info(
+                        "Score blend disabled: %s | score_gain=%.6f | ratio_shift=%.4f",
+                        reason, score_gain, ratio_shift,
+                    )
+                    tune_cfg = baseline_tune
+                    tune_cfg["blend"] = {
+                        **blend_cfg,
+                        "enabled": False,
+                        "requested": True,
+                        "reason": reason,
+                    }
+            else:
+                if self.cfg.enable_score_blend:
+                    logger.warning("Score blend requested but base score matrices are unavailable")
+                tune_cfg = baseline_tune
+                tune_cfg["blend"] = {"enabled": False}
         else:
             tune_cfg = {
                 "score": None,
@@ -198,6 +382,7 @@ class CAMSPipeline:
                 "l_map": {},
                 "shrink": 0.0,
                 "force_artifacts": True,
+                "blend": {"enabled": False},
             }
             logger.warning("No sample scores available; using fallback tune config")
 
@@ -258,12 +443,17 @@ class CAMSPipeline:
         t_start = time.time()
         metrics = {
             "ppl_load_mode": self.cfg.ppl_load_mode,
+            "style_version": self.style_eng.style_version,
+            "enable_style_et": bool(self.cfg.enable_style_et),
+            "enable_score_blend": bool(self.cfg.enable_score_blend),
             "reuse_meta_scores": bool(self.cfg.reuse_meta_scores),
             "tuning_only": bool(self.cfg.tuning_only),
+            "base_models": self._base_model_names(),
             "checkpoint_usage": {
                 "ppl": False,
                 "style": False,
                 "meta": False,
+                "base_scores": False,
             },
         }
 
@@ -299,20 +489,42 @@ class CAMSPipeline:
         meta_sa = None
         if self.cfg.reuse_meta_scores or self.cfg.tuning_only:
             logger.info("Trying meta score checkpoints for tuning-only workflow")
+            base_names = self._base_model_names()
+            meta_signature_ok = self._meta_base_signature_ok(base_names)
             meta_te = _load_score_ckpt("meta_te", len(te_df))
             if sa_df is not None:
                 meta_sa = _load_score_ckpt("meta_sa", len(sa_df))
-            if meta_te is not None and (sa_df is None or meta_sa is not None):
+            base_te = None
+            base_sa = None
+            base_scores_ready = True
+            if self.cfg.enable_score_blend:
+                te_sum_ckpt = _load_matrix_ckpt("te_sum", len(te_df), len(base_names))
+                if sa_df is not None:
+                    sa_sum_ckpt = _load_matrix_ckpt("sa_sum", len(sa_df), len(base_names))
+                else:
+                    sa_sum_ckpt = None
+                base_scores_ready = te_sum_ckpt is not None and (sa_df is None or sa_sum_ckpt is not None)
+                if base_scores_ready:
+                    metrics["checkpoint_usage"]["base_scores"] = True
+                    base_te = te_sum_ckpt / self.cfg.n_folds
+                    base_sa = sa_sum_ckpt / self.cfg.n_folds if sa_sum_ckpt is not None else None
+
+            if (
+                meta_signature_ok and
+                meta_te is not None
+                and (sa_df is None or meta_sa is not None)
+                and (not self.cfg.enable_score_blend or base_scores_ready)
+            ):
                 metrics["checkpoint_usage"]["meta"] = True
                 logger.info("Meta score checkpoints found; skipping PPL/style/stacking/meta phases")
                 return self._tune_save_submission(
                     te_df, sa_df, te_langs, sa_langs, te_artifacts, sa_artifacts,
-                    meta_te, meta_sa, t_start, metrics,
+                    meta_te, meta_sa, t_start, metrics, base_te, base_sa, base_names,
                 )
             if self.cfg.tuning_only:
                 raise FileNotFoundError(
-                    "CAMSP_TUNING_ONLY=1 requires valid meta_te.npy"
-                    " and meta_sa.npy when test_sample.parquet exists"
+                    "CAMSP_TUNING_ONLY=1 requires valid meta_te.npy/meta_sa.npy"
+                    " and, when score blending is enabled, compatible te_sum.npy/sa_sum.npy"
                 )
             logger.warning("Meta score checkpoints incomplete; continuing full pipeline")
 
@@ -365,15 +577,22 @@ class CAMSPipeline:
         logger.info("PHASE 3/7: Style feature extraction")
         logger.info("=" * 60)
 
-        X_sty_all_ckpt = _load_ckpt("sty_train")
-        X_sty_te_ckpt = _load_ckpt("sty_test")
+        X_sty_all_ckpt = _load_ckpt(self._style_ckpt_name("train"))
+        X_sty_te_ckpt = _load_ckpt(self._style_ckpt_name("test"))
+        X_sty_sa_ckpt = (
+            _load_ckpt(self._style_ckpt_name("sample"))
+            if sa_df is not None else None
+        )
 
-        if X_sty_all_ckpt is not None and X_sty_te_ckpt is not None:
+        if (
+            X_sty_all_ckpt is not None
+            and X_sty_te_ckpt is not None
+            and (sa_df is None or X_sty_sa_ckpt is not None)
+        ):
             logger.info("Style checkpoints found — skipping extraction")
             metrics["checkpoint_usage"]["style"] = True
             X_sty_all = X_sty_all_ckpt
             X_sty_te = X_sty_te_ckpt
-            X_sty_sa_ckpt = _load_ckpt("sty_sample")
             X_sty_sa = X_sty_sa_ckpt
         else:
             sty_tr = self.style_eng.extract_batch(tr_full["code"].values, "Train")
@@ -394,10 +613,10 @@ class CAMSPipeline:
             X_sty_te = sty_te.astype(np.float32).values
             X_sty_sa = sty_sa.astype(np.float32).values if sty_sa is not None else None
 
-            _save_ckpt("sty_train", X_sty_all)
-            _save_ckpt("sty_test", X_sty_te)
+            _save_ckpt(self._style_ckpt_name("train"), X_sty_all)
+            _save_ckpt(self._style_ckpt_name("test"), X_sty_te)
             if X_sty_sa is not None:
-                _save_ckpt("sty_sample", X_sty_sa)
+                _save_ckpt(self._style_ckpt_name("sample"), X_sty_sa)
 
             del sty_tr, sty_te, sty_sa
             gc.collect()
@@ -411,10 +630,12 @@ class CAMSPipeline:
 
         n_train, n_test = len(tr_full), len(te_df)
         n_sample = len(sa_df) if sa_df is not None else 0
+        base_names = self._base_model_names()
+        n_base = len(base_names)
 
-        oof = np.zeros((n_train, 4), dtype=np.float32)
-        te_sum = np.zeros((n_test, 4), dtype=np.float32)
-        sa_sum = np.zeros((n_sample, 4), dtype=np.float32) if n_sample > 0 else None
+        oof = np.zeros((n_train, n_base), dtype=np.float32)
+        te_sum = np.zeros((n_test, n_base), dtype=np.float32)
+        sa_sum = np.zeros((n_sample, n_base), dtype=np.float32) if n_sample > 0 else None
 
         # Pre-fit char vocabulary
         logger.info("Pre-computing char vocabulary")
@@ -502,6 +723,30 @@ class CAMSPipeline:
             del c4
             gc.collect()
 
+            if self.cfg.enable_style_et:
+                c5 = ExtraTreesClassifier(
+                    n_estimators=240,
+                    max_features="sqrt",
+                    min_samples_leaf=20,
+                    class_weight="balanced_subsample",
+                    n_jobs=-1,
+                    random_state=self.cfg.seed + fi,
+                )
+                c5.fit(Xs_tr, ys_tr)
+                style_et_idx = base_names.index("style_et")
+                oof[va_idx, style_et_idx] = (
+                    c5.predict_proba(X_sty_all[va_idx])[:, 1].astype(np.float32)
+                )
+                te_sum[:, style_et_idx] += (
+                    c5.predict_proba(X_sty_te)[:, 1].astype(np.float32)
+                )
+                if X_sty_sa is not None:
+                    sa_sum[:, style_et_idx] += (
+                        c5.predict_proba(X_sty_sa)[:, 1].astype(np.float32)
+                    )
+                del c5
+                gc.collect()
+
             logger.info("Fold %d done in %.1fs", fi + 1, time.time() - t_fold)
 
             # Checkpoint after each fold
@@ -539,11 +784,12 @@ class CAMSPipeline:
         _save_ckpt("meta_te", meta_te)
         if meta_sa is not None:
             _save_ckpt("meta_sa", meta_sa)
+        _save_ckpt("meta_base_models", np.array(base_names, dtype="U32"))
 
         del meta, Xm_tr, Xm_te, Xm_sa, oof
         gc.collect()
 
         return self._tune_save_submission(
             te_df, sa_df, te_langs, sa_langs, te_artifacts, sa_artifacts,
-            meta_te, meta_sa, t_start, metrics,
+            meta_te, meta_sa, t_start, metrics, te_avg, sa_avg, base_names,
         )

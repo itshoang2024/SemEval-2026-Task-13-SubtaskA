@@ -54,24 +54,28 @@ Checkpoint directory:
 Current checkpoint names:
 
 - `ppl_train.npy`, `ppl_test.npy`, `ppl_sample.npy`: LLM perplexity feature matrices.
-- `sty_train.npy`, `sty_test.npy`, `sty_sample.npy`: style feature matrices after PPL columns are appended.
+- `sty_train.npy`, `sty_test.npy`, `sty_sample.npy`: Style V1 feature matrices after PPL columns are appended.
+- `sty_train_v2.npy`, `sty_test_v2.npy`, `sty_sample_v2.npy`: Style V2 feature matrices after PPL columns are appended.
 - `oof.npy`: out-of-fold base-model predictions for the combined train+validation set.
 - `te_sum.npy`: accumulated test base-model predictions across folds.
 - `sa_sum.npy`: accumulated sample base-model predictions across folds.
 - `meta_te.npy`, `meta_sa.npy`: meta-learner scores.
-- `run_metrics.json`: run metadata, checkpoint usage, PPL coverage, tuning config, sample F1 when available, machine ratio, and runtime. Written to `/kaggle/working/run_metrics.json` on Kaggle unless `CAMSP_METRICS_PATH` overrides it.
+- `meta_base_models.npy`: base-model names used to create `meta_te.npy` and `meta_sa.npy`.
+- `run_metrics.json`: run metadata, style version, enabled base models, checkpoint usage, PPL coverage, tuning/blend config, sample F1 when available, machine ratio, and runtime. Written to `/kaggle/working/run_metrics.json` on Kaggle unless `CAMSP_METRICS_PATH` overrides it.
 
 Checkpoint resume behavior:
 
-- `ppl_*.npy` and `sty_*.npy` are loaded automatically when present.
-- `meta_te.npy` and `meta_sa.npy` are loaded only when `CAMSP_REUSE_META_SCORES=1` or `CAMSP_TUNING_ONLY=1`.
-- `oof.npy`, `te_sum.npy`, and `sa_sum.npy` are saved for recovery/debugging but are not currently loaded to skip stacking.
+- `ppl_*.npy` and the current style-version `sty_*.npy` files are loaded automatically when present.
+- `meta_te.npy` and `meta_sa.npy` are loaded only when `CAMSP_REUSE_META_SCORES=1` or `CAMSP_TUNING_ONLY=1`, and `meta_base_models.npy` must match the currently enabled base models when present.
+- `te_sum.npy` and `sa_sum.npy` are loaded only when `CAMSP_ENABLE_SCORE_BLEND=1`; their row and column counts must match the current test/sample rows and enabled base models.
+- `oof.npy` is saved for recovery/debugging but is not currently loaded to skip stacking.
 
 Checkpoint compatibility depends on:
 
 - dataset row order and row count;
 - feature order and feature count;
 - fold count and base-model count;
+- style version and style checkpoint names;
 - checkpoint file names;
 - the current code version's interpretation of zero-filled fallback features.
 

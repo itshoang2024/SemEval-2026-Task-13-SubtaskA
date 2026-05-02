@@ -25,6 +25,7 @@ models/
 
 # ── Outputs ──
 submission.csv
+run_metrics.json
 output_log*
 *.log
 logs/

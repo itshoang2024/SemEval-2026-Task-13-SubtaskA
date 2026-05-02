@@ -42,6 +42,7 @@ class PipelineConfig:
         text_alpha: L2 regularization strength for SGD classifiers.
         text_max_iter: Maximum SGD training epochs.
         style_subsample: Row limit for HGB style model training.
+        style_version: Style feature set version. Supported values: v1, v2.
         ppl_candidates: Ordered list of LLM checkpoint paths to try.
         ppl_load_mode: LLM weight loading mode. Supported values: 4bit, fp16,
             bf16, fp32. Defaults to CAMSP_PPL_LOAD_MODE or 4bit.
@@ -53,6 +54,9 @@ class PipelineConfig:
             to ratio tuning when available.
         tuning_only: Require meta_te/meta_sa checkpoints and run only ratio
             tuning plus submission generation.
+        enable_style_et: Add an ExtraTrees style base model to stacking.
+        enable_score_blend: Tune a post-meta convex blend with base scores.
+        score_blend_grid: Search grid for meta-score blend weights.
         metrics_path: Optional JSON metrics output path.
         n_folds: Number of stratified folds for stacking.
         meta_lr: Learning rate for the HGB meta-learner.
@@ -81,6 +85,9 @@ class PipelineConfig:
 
     # --- Style Feature Engineering ---
     style_subsample: int = 350_000
+    style_version: str = field(
+        default_factory=lambda: os.getenv("CAMSP_STYLE_VERSION", "v1").lower()
+    )
 
     # --- LLM Perplexity ---
     ppl_candidates: List[str] = field(default_factory=lambda: [
@@ -101,6 +108,13 @@ class PipelineConfig:
         default_factory=lambda: _env_flag("CAMSP_REUSE_META_SCORES")
     )
     tuning_only: bool = field(default_factory=lambda: _env_flag("CAMSP_TUNING_ONLY"))
+    enable_style_et: bool = field(default_factory=lambda: _env_flag("CAMSP_ENABLE_STYLE_ET"))
+    enable_score_blend: bool = field(
+        default_factory=lambda: _env_flag("CAMSP_ENABLE_SCORE_BLEND")
+    )
+    score_blend_grid: np.ndarray = field(
+        default_factory=lambda: np.round(np.arange(0.0, 1.01, 0.05), 2)
+    )
     metrics_path: Optional[str] = field(
         default_factory=lambda: os.getenv("CAMSP_METRICS_PATH") or None
     )

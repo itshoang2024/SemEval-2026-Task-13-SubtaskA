@@ -15,6 +15,7 @@ import bz2
 import gc
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -46,6 +47,10 @@ class CodeStyleExtractor:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.cfg = config
+        self.style_version = (config.style_version or "v1").lower()
+        if self.style_version not in {"v1", "v2"}:
+            logger.warning("Unsupported style version '%s' — falling back to v1", self.style_version)
+            self.style_version = "v1"
 
     def _extract_single(self, code: str) -> dict:
         """Computes style features for a single code sample.
@@ -134,7 +139,69 @@ class CodeStyleExtractor:
         else:
             f["trigram_rep_ratio"] = 0.0
 
+        if self.style_version == "v2":
+            self._append_v2_features(code, lines, non_empty, f)
+
         return f
+
+    def _append_v2_features(
+        self,
+        code: str,
+        lines: list,
+        non_empty: list,
+        f: dict,
+    ) -> None:
+        """Appends additional language-agnostic style features in stable order."""
+        cc = max(len(code), 1)
+        line_count = max(len(lines), 1)
+        non_empty_count = max(len(non_empty), 1)
+
+        stripped_non_empty = [line.strip() for line in non_empty]
+        comment_prefixes = ("#", "//", "/*", "*", "--")
+        comment_lines = sum(
+            1 for line in stripped_non_empty if line.startswith(comment_prefixes)
+        )
+        f["comment_line_ratio"] = comment_lines / non_empty_count
+
+        f["quote_ratio"] = sum(code.count(ch) for ch in ("'", '"', "`")) / cc
+        f["operator_ratio"] = sum(code.count(ch) for ch in "+-*/%=<>!&|^~") / cc
+        f["bracket_ratio"] = sum(code.count(ch) for ch in "()[]{}") / cc
+        f["semicolon_ratio"] = code.count(";") / cc
+
+        idents = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", code[: self.cfg.max_chars])
+        if idents:
+            ident_lens = np.array([len(tok) for tok in idents], dtype=np.float32)
+            f["identifier_count_norm"] = len(idents) / max(cc / 1000.0, 1.0)
+            f["identifier_avg_len"] = float(ident_lens.mean())
+            f["identifier_std_len"] = float(ident_lens.std())
+            f["identifier_max_len"] = float(ident_lens.max())
+            snake = sum(1 for tok in idents if "_" in tok.strip("_"))
+            camel = sum(1 for tok in idents if re.search(r"[a-z][A-Za-z0-9]*[A-Z]", tok))
+            f["snake_identifier_ratio"] = snake / len(idents)
+            f["camel_identifier_ratio"] = camel / len(idents)
+        else:
+            f["identifier_count_norm"] = 0.0
+            f["identifier_avg_len"] = 0.0
+            f["identifier_std_len"] = 0.0
+            f["identifier_max_len"] = 0.0
+            f["snake_identifier_ratio"] = 0.0
+            f["camel_identifier_ratio"] = 0.0
+
+        if stripped_non_empty:
+            line_counts = Counter(stripped_non_empty)
+            duplicate_lines = sum(count - 1 for count in line_counts.values() if count > 1)
+            f["duplicate_line_ratio"] = duplicate_lines / non_empty_count
+        else:
+            f["duplicate_line_ratio"] = 0.0
+
+        f["long_line_ratio"] = sum(1 for line in lines if len(line) > 100) / line_count
+
+        control_keywords = re.findall(
+            r"\b(if|else|elif|for|while|switch|case|try|catch|except|finally|return|"
+            r"break|continue|class|def|function|async|await|lambda)\b",
+            code,
+        )
+        f["control_keyword_density"] = len(control_keywords) / non_empty_count
 
     def extract_batch(self, codes: np.ndarray, desc: str) -> pd.DataFrame:
         """Extracts style features for an entire array of code samples.

@@ -30,7 +30,7 @@ The test set contains unseen languages not present in training. CAMSP's defense 
 
 ## Methodology - Four Pillars
 
-### 1. Stacking Ensemble (4 Base Estimators)
+### 1. Stacking Ensemble (4 Base Estimators by Default)
 
 ```
 char_full    ─┐
@@ -44,6 +44,7 @@ style_hgb    ─┘
 - **char_family**: Same architecture, trained with inverse-sqrt family weights to balance generator diversity
 - **word_hash**: Word `(1,3)`-gram hashing vectorizer (`2^20` features) + SGD
 - **style_hgb**: Compression/entropy/style features fed into HistGradientBoosting
+- **style_et**: Optional ExtraTrees style model, enabled with `CAMSP_ENABLE_STYLE_ET=1`
 
 ### 2. LLM Perplexity Engine (Sequential Completion Strategy)
 
@@ -87,6 +88,8 @@ Beyond standard zlib ratio, CAMSP adds:
 - `indent_delta_entropy` - Entropy of indentation changes between lines
 - `line_len_cv` - Coefficient of variation of line lengths
 - `trigram_rep_ratio` - Character trigram repetition rate
+
+Set `CAMSP_STYLE_VERSION=v2` to append additional language-agnostic code statistics after the v1 columns: comment, quote/operator/bracket/semicolon, identifier-shape, duplicate-line, long-line, and control-keyword density features. The default remains `v1` for baseline reproducibility.
 
 ---
 
@@ -158,8 +161,8 @@ Supported load modes are `4bit`, `fp16`, `bf16`, and `fp32`. For full weights on
 | Phase | Behavior |
 |-------|----------|
 | LLM Perplexity | Test first, then sample, then train subsample until the LLM budget is exhausted |
-| Style Features | Compression, entropy, indentation, line, and repetition metrics |
-| 5-Fold Stacking | 4 base models across 5 stratified folds |
+| Style Features | `v1` compression/entropy/indentation features by default; optional appended `v2` code statistics |
+| 5-Fold Stacking | 4 base models across 5 stratified folds, or 5 when `CAMSP_ENABLE_STYLE_ET=1` |
 | Meta + Tuning | HGB meta-learner plus ratio search on `test_sample.parquet` when available |
 
 ### VRAM & Speed Notes
@@ -180,6 +183,23 @@ After one full run has produced `meta_te.npy` and `meta_sa.npy`, ratio-tuning-on
 ```
 
 Use `CAMSP_REUSE_META_SCORES=1` instead when you want to reuse compatible meta scores if they exist, but fall back to a full run if they are missing.
+
+For cheap modeling experiments, combine these environment flags as needed:
+
+```python
+%env CAMSP_STYLE_VERSION=v2
+%env CAMSP_ENABLE_STYLE_ET=1
+```
+
+For score-blending-only experiments, copy compatible `meta_te.npy`, `meta_sa.npy`, `meta_base_models.npy`, `te_sum.npy`, and `sa_sum.npy` from the selected full run, keep the same `CAMSP_ENABLE_STYLE_ET` setting, then run:
+
+```python
+%env CAMSP_TUNING_ONLY=1
+%env CAMSP_ENABLE_SCORE_BLEND=1
+!python scripts/run_inference.py
+```
+
+The score blender is accepted only when it improves `test_sample` Macro F1 over the non-blended meta score and keeps the test machine ratio within 3 percentage points of that non-blended run.
 
 ---
 

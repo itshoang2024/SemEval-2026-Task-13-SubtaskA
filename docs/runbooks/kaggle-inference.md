@@ -41,6 +41,21 @@ Full FP16 PPL mode:
 
 Supported `CAMSP_PPL_LOAD_MODE` values are `4bit`, `fp16`, `bf16`, and `fp32`. Use `fp16` for the full-weight Kaggle benchmark unless you have a specific reason to test `fp32`.
 
+Cheap feature/model experiments should keep `CAMSP_PPL_LOAD_MODE=4bit` and reuse only compatible `ppl_*.npy` from the baseline run:
+
+```python
+%env CAMSP_STYLE_VERSION=v2
+!python scripts/run_inference.py
+```
+
+To add the optional fifth style base model:
+
+```python
+%env CAMSP_STYLE_VERSION=v2
+%env CAMSP_ENABLE_STYLE_ET=1
+!python scripts/run_inference.py
+```
+
 ## Expected outputs
 
 - `/kaggle/working/submission.csv`
@@ -65,6 +80,16 @@ For tuning-only experiments after a full run has produced `meta_te.npy` and `met
 
 This requires valid `meta_te.npy` and, when `test_sample.parquet` exists, valid `meta_sa.npy` in `/kaggle/working/_ckpt/`. It skips PPL, style extraction, stacking, and meta-learning, then reruns ratio tuning, writes `submission.csv`, and exports `run_metrics.json`.
 
+For score-blending-only experiments, also copy compatible `te_sum.npy`, `sa_sum.npy`, and `meta_base_models.npy` from the same full run. Keep the same `CAMSP_ENABLE_STYLE_ET` setting as the source run, then use:
+
+```python
+%env CAMSP_TUNING_ONLY=1
+%env CAMSP_ENABLE_SCORE_BLEND=1
+!python scripts/run_inference.py
+```
+
+The orchestrator validates `te_sum/sa_sum` shape against the enabled base-model count. It applies a blend only if `test_sample` Macro F1 beats the non-blended meta score and the test machine ratio stays within 3 percentage points of the non-blended ratio.
+
 If you want to reuse meta scores when present but fall back to a full run when they are missing:
 
 ```python
@@ -78,6 +103,7 @@ Delete `/kaggle/working/_ckpt/` before rerunning if any of these changed:
 - feature extraction code;
 - LLM feature names or dimensions;
 - fold count or base-model count;
+- `CAMSP_STYLE_VERSION` or `CAMSP_ENABLE_STYLE_ET`;
 - checkpoint names;
 - model/tuning code that changes score interpretation.
 
@@ -109,7 +135,10 @@ with open("/kaggle/working/run_metrics.json") as f:
 
 print({
     "ppl_mode": metrics.get("ppl_load_mode"),
+    "style_version": metrics.get("style_version"),
+    "base_models": metrics.get("base_models"),
     "checkpoint_usage": metrics.get("checkpoint_usage"),
+    "blend": metrics.get("tuning", {}).get("blend"),
     "sample_f1": metrics.get("sample_f1"),
     "machine_ratio": metrics.get("machine_ratio"),
     "total_minutes": metrics.get("total_minutes"),

@@ -15,17 +15,19 @@ Kaggle notebook v7 should decide whether to reuse ppl_*.npy or sty_*.npy.
 `src/orchestrator.py` currently loads existing checkpoints automatically for these groups:
 
 - `ppl_train.npy`, `ppl_test.npy`, `ppl_sample.npy`
-- `sty_train.npy`, `sty_test.npy`, `sty_sample.npy`
+- Style v1: `sty_train.npy`, `sty_test.npy`, `sty_sample.npy`
+- Style v2: `sty_train_v2.npy`, `sty_test_v2.npy`, `sty_sample_v2.npy`
 
 It can also load these final score checkpoints when `CAMSP_REUSE_META_SCORES=1` or `CAMSP_TUNING_ONLY=1`:
 
 - `meta_te.npy`, `meta_sa.npy`
+- `meta_base_models.npy` when present, to validate the base-model names that produced `meta_*`
 
-It saves but does not currently reload these fold-accumulator files:
+It loads these fold-accumulator files only when `CAMSP_ENABLE_SCORE_BLEND=1` and validates their shape against the currently enabled base-model count:
 
-- `oof.npy`, `te_sum.npy`, `sa_sum.npy`
+- `te_sum.npy`, `sa_sum.npy`
 
-Copying `oof.npy`, `te_sum.npy`, or `sa_sum.npy` into a new Kaggle version does not skip those phases unless the orchestrator is changed to load them.
+It saves but does not currently reload `oof.npy`. Copying `oof.npy` into a new Kaggle version does not skip any phase.
 
 ## Safety rule
 
@@ -35,7 +37,7 @@ If uncertain, prefer this default:
 
 ```text
 Reuse ppl_*.npy only when PPL logic and data are unchanged.
-Recompute sty_*.npy unless style feature logic is definitely unchanged.
+Recompute sty_*.npy unless style feature version and style/PPL merge logic are definitely unchanged.
 Never copy all of _ckpt by default.
 ```
 
@@ -79,10 +81,13 @@ git diff "$BASE..HEAD" -- src/config.py src/features.py src/orchestrator.py src/
 | `LLMPerplexityEngine.FEATURE_NAMES` changed | No | No | Column count/order changed; `sty_*` also embeds PPL columns. |
 | `LLMPerplexityEngine` tokenization, NLL calculation, quantization, fallback-zero behavior, or model loading changed | No | No | PPL feature semantics changed. |
 | `CodeStyleExtractor` changed | Yes | No | PPL is independent; style feature values/order changed. |
+| `CAMSP_STYLE_VERSION` changed between `v1` and `v2` | Yes | No | Style checkpoint names and column counts differ; recompute style and downstream model scores. |
 | Style/PPL merge logic in `src/orchestrator.py` changed | Maybe | No | PPL may still be valid, but `sty_*` column composition changed. |
-| Base model, fold, vectorizer, SGD, or style HGB config changed | Yes | Yes | Current code reloads `ppl_*` and `sty_*`; later model stages will rerun. |
+| `CAMSP_ENABLE_STYLE_ET` or base-model count changed | Yes | Yes | Feature checkpoints are upstream, but `oof`, `te_sum`, `sa_sum`, and `meta_*` shapes are incompatible. |
+| Base model, fold, vectorizer, SGD, style HGB, or ExtraTrees config changed | Yes | Yes | Current code reloads `ppl_*` and compatible `sty_*`; later model stages will rerun. |
 | Meta-learner changed | Yes | Yes | Feature checkpoints are upstream, but `meta_*` must be recomputed. |
 | `OODRatioTuner` changed only | Yes | Yes | Reuse `meta_te.npy` and `meta_sa.npy` with `CAMSP_TUNING_ONLY=1` if meta scores are compatible. |
+| Score blending changed only | Yes | Yes | Reuse compatible `meta_*` plus `te_sum.npy` and `sa_sum.npy` when their column count matches enabled base models. |
 | Artifact detection changed only | Yes | Yes | It affects final forced labels, not PPL/style arrays. |
 
 When a row says "Maybe", inspect the exact diff. If the diff changes how a loaded checkpoint is interpreted, recompute it.
@@ -98,10 +103,12 @@ split data + row order
 
 split data + row order
     + src/config.py: max_chars
+    + src/config.py: CAMSP_STYLE_VERSION / style_version
     + src/features.py: CodeStyleExtractor
     + matching ppl_*.npy and PPL feature order
     + src/orchestrator.py: style/PPL merge wiring
-        -> sty_train.npy, sty_test.npy, sty_sample.npy
+        -> sty_train.npy, sty_test.npy, sty_sample.npy        (v1)
+        -> sty_train_v2.npy, sty_test_v2.npy, sty_sample_v2.npy (v2)
 ```
 
 Important: `sty_*.npy` already contains style features plus appended PPL columns. Reusing `sty_*` with newly computed or different `ppl_*` can create inconsistent training signals.
@@ -110,9 +117,17 @@ For tuning-only experiments:
 
 ```text
 compatible meta_te.npy + compatible meta_sa.npy
+    + compatible meta_base_models.npy when present
     + src/tuning.py changes only
     + unchanged test/sample row order
         -> rerun with CAMSP_TUNING_ONLY=1
+
+compatible meta_te.npy + compatible meta_sa.npy
+    + compatible meta_base_models.npy when present
+    + compatible te_sum.npy + compatible sa_sum.npy
+    + unchanged base-model count/order
+    + src/tuning.py or score-blend changes only
+        -> rerun with CAMSP_TUNING_ONLY=1 and CAMSP_ENABLE_SCORE_BLEND=1
 ```
 
 ## Validate copied checkpoints
@@ -127,6 +142,9 @@ ckpt = "/kaggle/working/_ckpt"
 for name in [
     "ppl_train.npy", "ppl_test.npy", "ppl_sample.npy",
     "sty_train.npy", "sty_test.npy", "sty_sample.npy",
+    "sty_train_v2.npy", "sty_test_v2.npy", "sty_sample_v2.npy",
+    "meta_te.npy", "meta_sa.npy", "meta_base_models.npy",
+    "te_sum.npy", "sa_sum.npy",
 ]:
     path = os.path.join(ckpt, name)
     if os.path.exists(path):
@@ -138,9 +156,11 @@ Expected compatibility checks:
 
 - `ppl_*` second dimension must equal `len(LLMPerplexityEngine.FEATURE_NAMES)`; currently this is `5`.
 - Each checkpoint row count must match its split: `train + validation`, `test`, or `test_sample`.
-- If `sty_*` is reused, its column count must match the current style feature output after PPL columns are appended.
+- If `sty_*` is reused, its file names and column count must match the current `CAMSP_STYLE_VERSION` after PPL columns are appended.
+- If `meta_base_models.npy` exists, its names must match the currently enabled base models exactly.
+- If `CAMSP_ENABLE_SCORE_BLEND=1`, `te_sum.npy` and `sa_sum.npy` must have columns equal to the currently enabled base model count: `4` by default, `5` with `CAMSP_ENABLE_STYLE_ET=1`.
 
-The current orchestrator does not enforce these checks automatically.
+The current orchestrator validates `meta_*` row counts and `te_sum/sa_sum` shapes for score blending. It does not fully validate PPL/style feature semantics, so the commit-diff review remains required.
 
 ## Copy only approved checkpoint groups
 
@@ -166,7 +186,7 @@ for name in ["ppl_train.npy", "ppl_test.npy", "ppl_sample.npy"]:
         print("missing", name)
 ```
 
-Copy PPL and style only when both groups are compatible:
+Copy PPL and style only when both groups are compatible. Choose the style files that match the current `CAMSP_STYLE_VERSION`:
 
 ```python
 import glob
@@ -191,6 +211,12 @@ for name in approved:
         print("missing", name)
 ```
 
+For Style V2, replace the style names with:
+
+```python
+["sty_train_v2.npy", "sty_test_v2.npy", "sty_sample_v2.npy"]
+```
+
 Copy meta scores only for tuning-only experiments:
 
 ```python
@@ -202,7 +228,7 @@ src_ckpt = glob.glob("/kaggle/input/**/_ckpt", recursive=True)[0]
 dst_ckpt = "/kaggle/working/_ckpt"
 os.makedirs(dst_ckpt, exist_ok=True)
 
-for name in ["meta_te.npy", "meta_sa.npy"]:
+for name in ["meta_te.npy", "meta_sa.npy", "meta_base_models.npy"]:
     src = os.path.join(src_ckpt, name)
     if os.path.exists(src):
         shutil.copy2(src, os.path.join(dst_ckpt, name))
@@ -211,7 +237,19 @@ for name in ["meta_te.npy", "meta_sa.npy"]:
         print("missing", name)
 ```
 
-Do not copy `oof.npy`, `te_sum.npy`, or `sa_sum.npy` for resume purposes unless the orchestrator has been changed to validate and load them.
+For score-blending-only experiments, also copy compatible base-score accumulators:
+
+```python
+for name in ["te_sum.npy", "sa_sum.npy"]:
+    src = os.path.join(src_ckpt, name)
+    if os.path.exists(src):
+        shutil.copy2(src, os.path.join(dst_ckpt, name))
+        print("copied", name)
+    else:
+        print("missing", name)
+```
+
+Do not copy `oof.npy` for resume purposes.
 
 ## Agent checklist
 
@@ -221,6 +259,8 @@ Before recommending checkpoint reuse, a coding agent must answer:
 - Did the Kaggle data version and row order stay unchanged?
 - Did any PPL-defining code/config change since `<commit-id>`?
 - Did any style-defining code/config or style/PPL merge code change since `<commit-id>`?
+- Did `CAMSP_STYLE_VERSION`, `CAMSP_ENABLE_STYLE_ET`, or the base-model order/count change?
+- If score blending is enabled, do `te_sum.npy` and `sa_sum.npy` match the enabled base-model count?
 - Are uncommitted local changes included in the diff review?
 - Is the plan copying only approved checkpoint groups, not the whole `_ckpt` folder?
 
