@@ -32,7 +32,7 @@ from .tuning import OODRatioTuner
 logger = logging.getLogger(__name__)
 
 # Maximum wall-clock for the entire pipeline (safety margin for Kaggle 12h)
-PIPELINE_DEADLINE_SEC = 8 * 3600  # 8 hours hard cap
+PIPELINE_DEADLINE_SEC = 12 * 3600  # 12 hours hard cap
 
 
 def _safe_lang_col(df: pd.DataFrame) -> np.ndarray:
