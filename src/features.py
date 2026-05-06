@@ -442,12 +442,20 @@ class LLMPerplexityEngine:
                         load_in_4bit=True,
                         bnb_4bit_compute_dtype=torch.float16,
                         bnb_4bit_quant_type="nf4",
-                    ),
-                    device_map="auto",
-                    trust_remote_code=True,
-                )
+                    )
+                    loaded_desc = "BnB NF4 4-bit"
+                else:
+                    dtype_map = {
+                        "fp16": torch.float16,
+                        "bf16": torch.bfloat16,
+                        "fp32": torch.float32,
+                    }
+                    model_kwargs["torch_dtype"] = dtype_map[load_mode]
+                    loaded_desc = load_mode
+
+                model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
                 model.eval()
-                logger.info("Loaded %s (BnB NF4 4-bit)", path)
+                logger.info("Loaded %s (%s)", path, loaded_desc)
                 return model, tokenizer
             except Exception as exc:
                 logger.warning("Failed %s: %s", path, exc)
