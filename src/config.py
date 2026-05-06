@@ -5,6 +5,7 @@ Centralizes all hyperparameters, model paths, and tuning grids
 using Python dataclasses for type safety and documentation.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
