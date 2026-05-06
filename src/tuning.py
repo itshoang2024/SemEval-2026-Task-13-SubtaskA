@@ -1,12 +1,12 @@
 """
-CAMSP v10 — OOD Adaptive Ratio Tuning.
+CAMSP 05_v9 parity OOD adaptive ratio tuning.
 
 Prevents catastrophic ratio collapse on unseen languages by using
 constrained grid search with language-aware shrinkage interpolation.
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -125,7 +125,7 @@ class OODRatioTuner:
         best = {
             "score": -1.0,
             "global": self.cfg.fallback_global_ratio,
-            "l_map": {},
+            "l_map": dict(self.cfg.lang_priors),
             "shrink": 0.0,
         }
 
@@ -166,42 +166,3 @@ class OODRatioTuner:
             best["score"], best["global"], best["shrink"],
         )
         return best
-
-    def tune_global_only(
-        self,
-        sample_labels: np.ndarray,
-        sample_scores: np.ndarray,
-        forced_artifacts: np.ndarray,
-    ) -> float:
-        """Finds the best single ratio treating ALL samples as one group.
-
-        Used when the test set has no 'language' column, making per-language
-        ratios useless. This re-tunes the global ratio by evaluating on the
-        sample WITHOUT any language-based splitting.
-
-        Args:
-            sample_labels: Ground-truth binary labels from test_sample.
-            sample_scores: Raw model scores from the meta-learner.
-            forced_artifacts: Boolean mask of detected hard artifacts.
-
-        Returns:
-            Optimal global ratio (float).
-        """
-        logger.info("Re-tuning global ratio for language-free test set")
-        norm = self.rank_normalize(sample_scores)
-        best_ratio = self.cfg.fallback_global_ratio
-        best_f1 = -1.0
-
-        for r in self.cfg.global_ratio_grid:
-            preds = self.apply_ratio(norm, r).copy()
-            preds[forced_artifacts] = 1
-            f1 = f1_score(sample_labels, preds, average="macro")
-            if f1 > best_f1:
-                best_f1 = f1
-                best_ratio = float(r)
-
-        logger.info(
-            "Global-only tuning -> best ratio: %.2f (F1=%.4f)",
-            best_ratio, best_f1,
-        )
-        return best_ratio

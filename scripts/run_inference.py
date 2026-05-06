@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CAMSP v10 — Kaggle Inference Entrypoint.
+CAMSP 05_v9 parity Kaggle inference entrypoint.
 
 Usage (single Kaggle notebook cell):
     !pip install bitsandbytes -q
@@ -40,7 +40,7 @@ def main():
     pipeline = CAMSPipeline()
     submission = pipeline.run()
     print(f"\n{'='*60}")
-    print(f"  CAMSP v10 Pipeline Complete")
+    print(f"  CAMSP 05_v9 Parity Pipeline Complete")
     print(f"  Predictions: {len(submission):,} rows")
     print(f"  Machine ratio: {submission['label'].mean():.2%}")
     print(f"{'='*60}")

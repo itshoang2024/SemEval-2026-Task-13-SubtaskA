@@ -1,5 +1,5 @@
 """
-CAMSP v10 — Data Ingestion & Encoding Utilities.
+CAMSP 05_v9 parity data ingestion and encoding utilities.
 
 Handles Kaggle dataset auto-discovery, parquet loading, artifact
 detection, and generator family weighting for balanced training.
@@ -134,7 +134,8 @@ class ArtifactDetector:
             elif "```" in code:
                 results[i] = True
             elif re.match(
-                r"^(Here is|Here's|Sure,|Certainly|Below is|The following)", code
+                r"^(Here is|Here's|Sure,|Certainly|Below is|The following|Let me |I'll )",
+                code,
             ):
                 results[i] = True
         logger.info(
@@ -162,6 +163,7 @@ class GeneratorFamilyEncoder:
         ("gpt", "gpt"),
         ("deepseek", "deepseek"),
         ("yi-coder", "yi"),
+        ("yi/", "yi"),
         ("starcoder", "starcoder"),
         ("codegemma", "gemma"),
         ("codellama", "llama"),

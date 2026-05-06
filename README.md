@@ -1,4 +1,4 @@
-# CAMSP v10 — Compression-Aware Meta-Stacking Pipeline
+# CAMSP v9-Parity - Compression-Aware Meta-Stacking Pipeline
 
 > **SemEval 2026 Task 13 Subtask A**: AI-Generated Code Detection  
 > *Detecting machine-generated code across 8+ programming languages with Out-of-Distribution resilience*
@@ -46,17 +46,36 @@ style_hgb    ─┘
 
 ### 2. LLM Perplexity Engine (Test-First Strategy)
 
-Uses **Qwen2.5-Coder-0.5B** quantized to **NF4 4-bit** (BitsAndBytes) to compute token-level negative log-likelihood.
+Uses **Qwen2.5-Coder-0.5B** for token-level NLL features when CUDA, Transformers, and a loadable model are available. By default it loads the model with **NF4 4-bit** BitsAndBytes quantization; set `CAMSP_PPL_LOAD_MODE=fp16` to benchmark full FP16 weights.
 
-**Key innovation**: Budget allocation prioritizes the test set (55% of time → ~25-30% test coverage) before consuming remaining budget on sample and train subsets.
+Current v10.1/v10.2 behavior:
+
+- **Priority 1**: Process the test set first, targeting full completion before any lower-priority split.
+- **Priority 2**: Process `test_sample.parquet` next when it exists.
+- **Priority 3**: Use the remaining LLM time budget on a train subsample.
+- **Fallback**: If CUDA, Transformers, or model loading is unavailable, the pipeline continues with zero-filled LLM features.
+
+Current LLM defaults from `PipelineConfig`:
+
+| Setting | Value |
+|---------|-------|
+| Load mode | `4bit` by default; override with `CAMSP_PPL_LOAD_MODE` |
+| Max tokens | `128` |
+| Batch size | `128` |
+| Train subsample | `50,000` |
+| LLM time budget | `25,200s` (`7h`) |
 
 ### 3. Adaptive Constraint Engine (OODRatioTuner)
 
 Prevents the "ratio collapse" failure mode where the model labels everything as human on OOD data:
 
-- **Global ratio floor**: Clamped to `[0.10, 0.40]` (never below 10%)
-- **Per-language tuning**: Independent ratios per language on `test_sample.parquet`
-- **Shrinkage interpolation**: `ratio = (1-s) * global + s * per_lang` with `s ∈ {0, 0.25, 0.5, 0.75, 1.0}`
+- **Global ratio grid**: `0.05` to `0.50` inclusive, step `0.01`
+- **Per-language ratio grid**: `0.02` to `0.50` inclusive, step `0.01`
+- **Shrinkage interpolation**: `ratio = (1-s) * global + s * per_lang`
+- **Shrinkage grid**: `{0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0}`
+- **Fallback global ratio**: `0.22`
+
+v10.2 also handles the case where `test.parquet` has no `language` column: it re-tunes a global-only ratio on `test_sample.parquet` and applies that global ratio to the full test set.
 
 ### 4. Extended Compression Features
 
@@ -123,9 +142,11 @@ SemEval-2026-Task-13-SubtaskA/
 | Meta + Tuning | ~2 min | HGB stacking + ratio search |
 
 ### VRAM & Speed Notes
-- Qwen-0.5B at NF4 4-bit uses **~500MB VRAM** — stable on T4 (16GB)
-- Batch size 64 with 64-token sequences → **~60 samples/sec** throughput
-- All sparse matrices (TF-IDF) use CSR format — peak RAM ~8GB
+
+- Qwen-0.5B at NF4 4-bit is intended to fit comfortably on Kaggle GPU runtimes; FP16 full weights use more VRAM but may benchmark faster for this small model.
+- Batch size defaults to `128`; the LLM engine halves batch size on CUDA OOM down to a minimum of `8`.
+- All sparse matrices use CSR-compatible scikit-learn vectorizers.
+- Expensive intermediate arrays are checkpointed to `/kaggle/working/_ckpt/` on Kaggle.
 
 ---
 
@@ -136,8 +157,10 @@ SemEval-2026-Task-13-SubtaskA/
 - **Sample Macro F1**: `0.7135`
 - **Global OOD Ratio**: `0.10`
 - **Adaptive Shrinkage**: `1.00`
-- **Test Set Machine Predictions**: `10.06%` (50,291 / 500,000)
-- **Total Execution Time**: `245.5m` (~4 hours)
+- **Test Set Machine Predictions**: `10.06%` (`50,291 / 500,000`)
+- **Total Execution Time**: `245.5m`
+
+These numbers are retained as historical reference only. Current v10.2 defaults use a wider ratio grid (`0.05` to `0.50`), 128-token LLM windows, 128 batch size, checkpointed expensive arrays, and global-only retuning when the full test set has no `language` column.
 
 ### Tuned Language Ratios:
 > Derived via 5-Fold OOF Stack Tuning to prevent minority language collapse.

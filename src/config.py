@@ -1,12 +1,12 @@
 """
-CAMSP v10 — Pipeline Configuration Module.
+CAMSP 05_v9 parity pipeline configuration module.
 
 Centralizes all hyperparameters, model paths, and tuning grids
 using Python dataclasses for type safety and documentation.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -42,11 +42,10 @@ class PipelineConfig:
         meta_lr: Learning rate for the HGB meta-learner.
         meta_max_iter: Maximum boosting iterations for meta-learner.
         meta_max_leaf_nodes: Tree complexity cap for meta-learner.
-        ratio_floor: Minimum allowed machine-generation ratio.
-        ratio_ceil: Maximum allowed machine-generation ratio.
         global_ratio_grid: Search grid for global prediction ratio.
         lang_ratio_grid: Search grid for per-language prediction ratio.
         shrink_grid: Interpolation weights between global and language ratios.
+        lang_priors: Default per-language ratios used when tuning data is absent.
         fallback_global_ratio: Default ratio when tuning data is unavailable.
         special_tokens: LLM control tokens indicating AI-generated artifacts.
     """
@@ -70,30 +69,48 @@ class PipelineConfig:
     ppl_candidates: List[str] = field(default_factory=lambda: [
         "/kaggle/input/qwen2.5-coder/transformers/0.5b-instruct/1",
         "/kaggle/input/qwen2.5-coder/transformers/1.5b-instruct/1",
+        "/kaggle/input/qwen2.5-coder/transformers/0.5b/1",
+        "/kaggle/input/qwen2.5-coder/transformers/1.5b/1",
         "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+        "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     ])
-    ppl_max_tokens: int = 128
-    ppl_batch_size: int = 128
+    ppl_load_mode: str = field(
+        default_factory=lambda: os.getenv("CAMSP_PPL_LOAD_MODE", "4bit").lower()
+    )
+    ppl_max_tokens: int = 64
+    ppl_batch_size: int = 64
     ppl_train_subsample: int = 50_000
-    ppl_time_budget_sec: int = 25_200  # 7 hours
+    ppl_time_budget_sec: int = 7_200  # 120 minutes, matching 05_v9
 
     # --- Stacking Meta-Learner ---
     n_folds: int = 5
-    meta_lr: float = 0.02
-    meta_max_iter: int = 500
-    meta_max_leaf_nodes: int = 63
+    meta_lr: float = 0.05
+    meta_max_iter: int = 300
+    meta_max_leaf_nodes: int = 31
 
     # --- OOD Ratio Tuning ---
-    ratio_floor: float = 0.05
-    ratio_ceil: float = 0.50
+    ratio_floor: float = 0.10
+    ratio_ceil: float = 0.40
     global_ratio_grid: np.ndarray = field(
-        default_factory=lambda: np.arange(0.05, 0.51, 0.01)
+        default_factory=lambda: np.arange(0.10, 0.41, 0.01)
     )
     lang_ratio_grid: np.ndarray = field(
-        default_factory=lambda: np.arange(0.02, 0.51, 0.01)
+        default_factory=lambda: np.arange(0.05, 0.41, 0.01)
     )
     shrink_grid: List[float] = field(
-        default_factory=lambda: [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
+        default_factory=lambda: [0.0, 0.25, 0.5, 0.75, 1.0]
+    )
+    lang_priors: Dict[str, float] = field(
+        default_factory=lambda: {
+            "C": 0.20,
+            "C#": 0.23,
+            "C++": 0.17,
+            "Go": 0.27,
+            "Java": 0.16,
+            "JavaScript": 0.38,
+            "PHP": 0.06,
+            "Python": 0.26,
+        }
     )
     fallback_global_ratio: float = 0.22
 
@@ -102,6 +119,11 @@ class PipelineConfig:
         "\x3c|endoftext|\x3e",
         "\x3c|im_end|\x3e",
         "\x3c|assistant|\x3e",
+        "\x3c|user|\x3e",
+        "\x3c|system|\x3e",
+        "\x3c|pad|\x3e",
+        "\x3c|begin|\x3e",
+        "\x3c|end|\x3e",
         "\x3c|start_header_id|\x3e",
         "\x3c|im_start|\x3e",
         "\x3c|eot_id|\x3e",

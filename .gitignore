@@ -34,3 +34,5 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+
+semeval-2026-peak/
