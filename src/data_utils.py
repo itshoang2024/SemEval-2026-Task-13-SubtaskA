@@ -201,7 +201,7 @@ class GeneratorFamilyEncoder:
         weights = (
             families.map(lambda x: 1.0 / math.sqrt(counts[x]))
             .astype(np.float32)
-            .values
+            .to_numpy(copy=True)
         )
         weights *= len(weights) / weights.sum()
         return weights

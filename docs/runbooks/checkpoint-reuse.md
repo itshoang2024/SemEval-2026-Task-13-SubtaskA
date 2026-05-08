@@ -17,6 +17,8 @@ Kaggle notebook v7 should decide whether to reuse versioned `ppl_*_v9p.npy` or `
 - `ppl_train_v9p.npy`, `ppl_test_v9p.npy`, `ppl_sample_v9p.npy`
 - `sty_train_v9p.npy`, `sty_test_v9p.npy`, `sty_sample_v9p.npy`
 
+During a fresh run, `sty_*` checkpoints are also reloaded after style extraction. This is an intentional memory boundary before the char vocabulary fit; it does not make stale style checkpoints safer to reuse across data or code changes.
+
 It saves but does not currently reload these later files:
 
 - `oof_v9p.npy`, `te_sum_v9p.npy`, `sa_sum_v9p.npy`

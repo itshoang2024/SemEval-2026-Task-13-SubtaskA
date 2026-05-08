@@ -54,7 +54,7 @@ artifact detector --------------------------------------+
 3. Artifact detection: hard artifact masks are computed for test and sample code; these force final predictions to machine-generated.
 4. LLM perplexity: `LLMPerplexityEngine.execute()` computes compression-backed PPL features first, then uses Qwen to overwrite completed test, sample, and train-subset rows within the 05_v9 budget policy. Missing CUDA/Transformers/model availability keeps compression-backed PPL features.
 5. Style features: `CodeStyleExtractor.extract_batch()` computes the 05_v9 handcrafted feature set. LLM PPL columns and language one-hot columns are appended to style feature frames before checkpointing.
-6. K-fold stacking: four base estimators produce out-of-fold train predictions and averaged test/sample predictions.
+6. K-fold stacking: style matrices are released before the memory-heavy char vocabulary fit, then reloaded from `sty_*` checkpoints. Four base estimators produce out-of-fold train predictions and averaged test/sample predictions.
 7. Meta-learner: an HGB classifier trains on base OOF predictions plus PPL features plus language one-hot features and scores test/sample rows.
 8. Ratio tuning: `OODRatioTuner` tunes on `test_sample.parquet` when available. If `test.parquet` has no `language` column, test rows are `Unknown` and language-aware prediction uses the tuned global ratio for that group.
 9. Submission: `submission.csv` is written with columns `ID,label`.
@@ -62,6 +62,8 @@ artifact detector --------------------------------------+
 ## Checkpoints
 
 `src/orchestrator.py` writes `.npy` checkpoints for expensive arrays. In Kaggle, the directory is `/kaggle/working/_ckpt`; outside Kaggle, it is `/tmp/_ckpt`.
+
+Style checkpoints are also used as an in-run memory boundary: after style feature extraction, `sty_*` arrays are saved, released before char vocabulary fitting, and reloaded before fold training.
 
 Checkpoint reuse is positional and assumes compatible row ordering, feature ordering, fold count, and dataset size. If any of those change, delete stale checkpoints before rerunning.
 

@@ -230,6 +230,10 @@ class CAMSPipeline:
             del sty_tr, sty_te, sty_sa
             gc.collect()
 
+        logger.info("Releasing style matrices before char vocabulary fit")
+        del X_sty_all, X_sty_te, X_sty_sa
+        gc.collect()
+
         self._check_deadline(t_start, "Style")
 
         logger.info("=" * 60)
@@ -256,6 +260,22 @@ class CAMSPipeline:
         char_vocab = cv_master.vocabulary_
         del cv_master
         gc.collect()
+        logger.info("Char vocabulary ready: %d features", len(char_vocab))
+
+        logger.info("Reloading style feature checkpoints")
+        X_sty_all = _load_ckpt("sty_train")
+        X_sty_te = _load_ckpt("sty_test")
+        X_sty_sa = _load_ckpt("sty_sample") if sa_df is not None else None
+        if (
+            X_sty_all is None
+            or X_sty_te is None
+            or (sa_df is not None and X_sty_sa is None)
+        ):
+            raise RuntimeError("Style checkpoints missing after vocabulary fit")
+        if X_sty_all.shape[0] != n_train or X_sty_te.shape[0] != n_test:
+            raise RuntimeError("Style checkpoint row count does not match current data")
+        if X_sty_sa is not None and X_sty_sa.shape[0] != n_sample:
+            raise RuntimeError("Sample style checkpoint row count does not match current data")
 
         wv = HashingVectorizer(
             analyzer="word",
